@@ -1,0 +1,18 @@
+# Environment / secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Runtime-generated data
+logs/
+output/
+data/intake/
+~$*
+
+# OS
+.DS_Store
+Thumbs.db
