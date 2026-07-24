@@ -16,3 +16,7 @@ data/intake/
 # OS
 .DS_Store
 Thumbs.db
+
+.claude/
+
+.claude/

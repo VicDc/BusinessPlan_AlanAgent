@@ -97,7 +97,8 @@ def log_orchestrator_iteration(
     iteration: int,
     final_status: str,
     revisions_needed_count: int,
-    agents_flagged: list[str]
+    agents_flagged: list[str],
+    revisions_applied: int | None = None
 ):
     record = {
         "type": "orchestrator_iteration",
@@ -105,7 +106,8 @@ def log_orchestrator_iteration(
         "iteration": iteration,
         "final_status": final_status,
         "revisions_needed_count": revisions_needed_count,
-        "agents_flagged": agents_flagged
+        "agents_flagged": agents_flagged,
+        "revisions_applied": revisions_applied
     }
     _safe_write_log(record)
 

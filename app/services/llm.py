@@ -45,7 +45,8 @@ class LLMService:
                 {"role": "user", "content": user_message}
             ],
             "temperature": temperature,
-            "max_tokens": max_tokens
+            "max_tokens": max_tokens,
+            "chat_template_kwargs": {"enable_thinking": False}
         }
 
         call_id = new_call_id()
@@ -62,7 +63,19 @@ class LLMService:
                     response = await client.post(f"{self.base_url}/chat/completions", json=payload, headers=self._headers)
                     response.raise_for_status()
                     data = response.json()
-                    content = data["choices"][0]["message"]["content"]
+                    message = data["choices"][0]["message"]
+                    content = message["content"]
+
+                    if not content or not content.strip():
+                        reasoning_content = message.get("reasoning_content")
+                        if reasoning_content:
+                            raise ValueError(
+                                f"Il modello ha prodotto solo reasoning_content "
+                                f"({len(reasoning_content)} token) e nessun contenuto: "
+                                "la modalità thinking è probabilmente attiva lato server. "
+                                "Disattivala nel prompt template del modello in LM Studio."
+                            )
+                        raise ValueError("Risposta vuota dal modello")
 
                     usage = data.get("usage") or {}
                     prompt_tokens = usage.get("prompt_tokens")

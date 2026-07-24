@@ -17,7 +17,7 @@ from app.agents.financial_agent import FinancialAgent
 from app.agents.funding_agent import FundingAgent
 from app.agents.orchestrator import Orchestrator
 from app.services.charts import render_chart_specs
-from app.services.report_builder import markdown_to_docx, save_markdown_report
+from app.services.report_builder import markdown_to_docx, render_agent_section, save_markdown_report
 from app.services.llm_logging import new_call_id
 
 
@@ -277,11 +277,14 @@ async def test_orchestrator_revision_loop_and_max_cycles(base_profile):
     llm = MultiOrchLLMService(mock_responses)
     orchestrator = Orchestrator(llm)
     
-    with patch("app.services.charts.render_chart_specs", return_value=[]), \
+    # Ermetico: lo scenario richiede >=2 iterazioni, non dipendere dal
+    # MAX_REVISION_CYCLES ambientale (.env può impostarlo a 1).
+    with patch("app.agents.orchestrator.settings.MAX_REVISION_CYCLES", 3), \
+         patch("app.services.charts.render_chart_specs", return_value=[]), \
          patch("app.agents.orchestrator.markdown_to_docx", return_value="dummy_path.docx"), \
          patch("app.agents.orchestrator.save_markdown_report", return_value="dummy_path.md"):
         result = await orchestrator.run(base_profile)
-        
+
         assert result.status == RevisionStatus.APPROVED
         assert result.total_iterations == 2
         assert len(result.revision_log) == 1
@@ -363,3 +366,26 @@ This is a test summary.
         content = Path(md_path).read_text(encoding="utf-8")
         assert "Business Plan" in content
         assert "dummy_chart.png" in content
+
+
+def test_render_agent_section_is_readable_not_json():
+    data = {
+        "value_proposition": "Pane fresco a domicilio",
+        "need_validation": {"is_clear": True, "comment": "Bisogno concreto"},
+        "competitors": [
+            {"name": "Forno A", "strengths": "vicino", "weaknesses": "caro"},
+            {"name": "Forno B", "strengths": "economico", "weaknesses": "lontano"},
+        ],
+        "risk_flags": ["mercato piccolo", "stagionalità"],
+        "confidence": 0.8,          # deve essere omesso
+        "charts_needed": [{"x": 1}],  # deve essere omesso
+    }
+    md = render_agent_section("vision", data)
+
+    assert "```json" not in md
+    assert "## Vision" in md
+    assert "**Value Proposition:** Pane fresco a domicilio" in md
+    assert "| Name | Strengths | Weaknesses |" in md   # lista di dict → tabella
+    assert "- mercato piccolo" in md                    # lista di stringhe → bullet
+    assert "confidence" not in md.lower()               # chiave tecnica omessa
+    assert "charts_needed" not in md

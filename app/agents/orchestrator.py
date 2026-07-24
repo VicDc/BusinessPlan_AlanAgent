@@ -11,9 +11,20 @@ from app.core.types import (
 )
 from app.core.prompts import ORCHESTRATOR_PROMPT
 from app.services.charts import render_chart_specs
-from app.services.report_builder import build_draft_markdown, markdown_to_docx, save_markdown_report
+from app.services.report_builder import build_draft_markdown, markdown_to_docx, render_agent_section, save_markdown_report
 from app.services.llm_logging import log_orchestrator_iteration
 from app.config.settings import settings
+
+
+CANONICAL_AGENTS = ("vision", "market", "team", "setup", "financial", "funding")
+
+
+def _resolve_agents(raw_name: str) -> list[str]:
+    """Estrae uno o più nomi canonici di agente da una stringa arbitraria
+    prodotta dall'LLM. Gestisce maiuscole, underscore, spazi, e riferimenti
+    multipli tipo 'FinancialAgent & TeamAgent'."""
+    normalized = raw_name.lower().replace("_", " ").replace("-", " ").replace("agent", " ")
+    return [name for name in CANONICAL_AGENTS if name in normalized]
 
 
 class Orchestrator:
@@ -69,7 +80,7 @@ class Orchestrator:
                 system_prompt=ORCHESTRATOR_PROMPT,
                 user_message=self._build_orchestrator_message(profile, agent_outputs, iteration),
                 temperature=0.1,
-                max_tokens=5000,
+                max_tokens=12000,
                 agent_name="Orchestrator"
             )
 
@@ -78,12 +89,40 @@ class Orchestrator:
             except json.JSONDecodeError:
                 break
 
+            # Risolvi i nomi agente delle revisioni (robusto a maiuscole,
+            # underscore, riferimenti multipli). Un nome non riconosciuto NON
+            # viene scartato in silenzio: logga un warning esplicito.
+            grouped = {}
+            revisions_applied = 0  # voci raw con ≥1 agente valido (poi rilanciato)
+            for rev in orch_data.get("revisions_needed", []):
+                raw_name = rev.get("agent", "")
+                resolved = _resolve_agents(raw_name)
+                if not resolved:
+                    print(f"[Orchestrator] Nome agente non riconosciuto: '{raw_name}' — correzione ignorata")
+                    continue
+                revisions_applied += 1
+                ctx = rev.get("correction_context", "")
+                for agent_name in resolved:
+                    grouped.setdefault(agent_name, []).append(ctx)
+
+            revisions = []
+            for agent_name, contexts in grouped.items():
+                if len(contexts) > 1:
+                    correction = "\n\n---\n\n".join(f"Correzione {i}:\n{ctx}" for i, ctx in enumerate(contexts, 1))
+                else:
+                    correction = contexts[0] if contexts else ""
+                revisions.append({
+                    "agent": agent_name,
+                    "correction_context": correction
+                })
+
             log_orchestrator_iteration(
                 run_id=plan_id,
                 iteration=iteration,
                 final_status=orch_data.get("status", "UNKNOWN"),
                 revisions_needed_count=len(orch_data.get("revisions_needed", [])),
-                agents_flagged=[r["agent"] for r in orch_data.get("revisions_needed", [])]
+                agents_flagged=[r["agent"] for r in orch_data.get("revisions_needed", [])],
+                revisions_applied=revisions_applied
             )
 
             draft_md = build_draft_markdown(
@@ -124,33 +163,12 @@ class Orchestrator:
                 )
 
             # REVISION_NEEDED: rilancia gli agenti indicati con correction_context
-            revisions_raw = orch_data.get("revisions_needed", [])
-            
-            # Deduplicate by agent
-            grouped = {}
-            for rev in revisions_raw:
-                agent_key = rev.get("agent", "")
-                if not agent_key:
-                    continue
-                agent_normalized = agent_key.lower().replace("agent", "").strip()
-                grouped.setdefault(agent_normalized, []).append(rev.get("correction_context", ""))
-            
-            revisions = []
-            for agent_name, contexts in grouped.items():
-                if len(contexts) > 1:
-                    correction = "\n\n---\n\n".join(f"Correzione {i}:\n{ctx}" for i, ctx in enumerate(contexts, 1))
-                else:
-                    correction = contexts[0] if contexts else ""
-                revisions.append({
-                    "agent": agent_name,
-                    "correction_context": correction
-                })
-
+            # (revisions già risolte/deduplicate sopra)
             revision_log.append({"iteration": iteration, "revisions": revisions})
 
             # Rilancio di ogni agente modificato
             for rev in revisions:
-                agent_name = rev["agent"].lower().replace("agent", "").strip()
+                agent_name = rev["agent"]
                 correction = rev["correction_context"]
                 self.llm.iteration = iteration
 
@@ -181,7 +199,7 @@ class Orchestrator:
             # Dopo aver rieseguito gli agenti corretti, aggiorniamo il contesto per quelli dipendenti
             # (Ad esempio, se Vision/Market/Team/Setup cambiano, Financial e Funding devono essere rieseguiti o adattarsi)
             # Per robustezza ricalcoliamo le dipendenze degli agenti aggiornati se necessario
-            updated_agents = {rev["agent"].lower().replace("agent", "").strip() for rev in revisions}
+            updated_agents = {rev["agent"] for rev in revisions}
             if any(a in updated_agents for a in ("vision", "market", "team", "setup")):
                 if "financial" not in updated_agents:
                     # Rieseguiamo Financial con il nuovo contesto a monte
@@ -204,18 +222,21 @@ class Orchestrator:
             "validate per coerenza dall'Orchestrator dopo il numero massimo di cicli di revisione.\n"
         ]
         for agent_key, ao in agent_outputs.items():
-            fallback_sections.append(f"\n## {agent_key.capitalize()}\n")
-            fallback_sections.append(
-                f"```json\n{json.dumps(ao.data, indent=2, ensure_ascii=False)}\n```"
-            )
+            fallback_sections.append("")
+            fallback_sections.append(render_agent_section(agent_key, ao.data))
         fallback_markdown = "\n".join(fallback_sections)
 
+        # Anche il report parziale merita i grafici: stesso rendering deterministico
+        # del ramo APPROVED, sulle charts_needed prodotte da FinancialAgent.
+        fallback_chart_specs = agent_outputs["financial"].data.get("charts_needed", [])
+        fallback_charts = render_chart_specs(fallback_chart_specs)
+
         fallback_docx = markdown_to_docx(
-            fallback_markdown, chart_paths=[],
+            fallback_markdown, chart_paths=fallback_charts,
             output_filename=f"business_plan_{plan_id}_partial.docx"
         )
         fallback_md = save_markdown_report(
-            fallback_markdown, chart_paths=[],
+            fallback_markdown, chart_paths=fallback_charts,
             output_filename=f"business_plan_{plan_id}_partial.md"
         )
 
@@ -224,7 +245,7 @@ class Orchestrator:
             profile=profile,
             agent_outputs=agent_outputs,
             revision_log=revision_log,
-            charts_generated=[],
+            charts_generated=fallback_charts,
             business_plan_markdown=fallback_markdown,
             business_plan_docx_path=fallback_docx,
             business_plan_md_path=fallback_md,

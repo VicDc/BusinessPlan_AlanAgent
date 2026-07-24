@@ -20,7 +20,7 @@ class VisionAgent(BaseAgent):
             system_prompt=VISION_AGENT_PROMPT,
             user_message=user_message,
             temperature=0.2,
-            max_tokens=3000,
+            max_tokens=8000,
             agent_name=self.name
         )
         call_id = self.llm.last_call_id

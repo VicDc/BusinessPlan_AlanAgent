@@ -41,7 +41,7 @@ class IntakeAgent:
             system_prompt=INTAKE_AGENT_PROMPT,
             user_message=raw_markdown,
             temperature=0.1,
-            max_tokens=3000,
+            max_tokens=8000,
             agent_name=self.name
         )
         call_id = self.llm.last_call_id
