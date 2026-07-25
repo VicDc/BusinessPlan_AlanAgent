@@ -9,7 +9,7 @@ from app.agents.funding_agent import FundingAgent
 from app.core.types import (
     AgentOutput, BusinessIdeaProfile, OrchestratorResult, RevisionStatus
 )
-from app.core.prompts import ORCHESTRATOR_PROMPT
+from app.core.prompts import ORCHESTRATOR_PROMPT, REPORT_WRITER_PROMPT
 from app.services.charts import render_chart_specs
 from app.services.report_builder import build_draft_markdown, markdown_to_docx, render_agent_section, save_markdown_report
 from app.services.llm_logging import log_orchestrator_iteration
@@ -139,7 +139,18 @@ class Orchestrator:
                 chart_specs = financial_out.data.get("charts_needed", [])
                 charts_generated = render_chart_specs(chart_specs)
 
-                markdown = orch_data.get("business_plan_markdown", "")
+                # Seconda chiamata: la scrittura del business plan è delegata a
+                # un agente dedicato (ReportWriter). L'Orchestrator decide solo
+                # la coerenza; separare le due chiamate evita che Gemma saturi
+                # il budget di reasoning e restituisca un plan vuoto.
+                self.llm.iteration = iteration
+                markdown = await self.llm.generate(
+                    system_prompt=REPORT_WRITER_PROMPT,
+                    user_message=self._build_orchestrator_message(profile, agent_outputs, iteration),
+                    temperature=0.2,
+                    max_tokens=12000,
+                    agent_name="ReportWriter"
+                )
                 docx_path = markdown_to_docx(
                     markdown, chart_paths=charts_generated,
                     output_filename=f"business_plan_{plan_id}.docx"

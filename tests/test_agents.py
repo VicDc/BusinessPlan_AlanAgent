@@ -18,6 +18,7 @@ from app.agents.funding_agent import FundingAgent
 from app.agents.orchestrator import Orchestrator
 from app.services.charts import render_chart_specs
 from app.services.report_builder import markdown_to_docx, render_agent_section, save_markdown_report
+from docx import Document
 from app.services.llm_logging import new_call_id
 
 
@@ -58,6 +59,8 @@ class MockLLMService:
             return self.responses.get("funding", "{}")
         elif "partner di un team" in system_prompt:
             return self.responses.get("orchestrator", "{}")
+        elif "redattore finale" in system_prompt:
+            return self.responses.get("report_writer", "")
         return "{}"
 
 
@@ -205,10 +208,10 @@ async def test_orchestrator_approved_flow(base_profile, tmp_path):
         "orchestrator": json.dumps({
             "status": "APPROVED",
             "revisions_needed": [],
-            "business_plan_markdown": "# Business Plan Test\nFine.",
             "confidence_overall": 0.9,
             "iteration": 1
-        })
+        }),
+        "report_writer": "# Business Plan Test\nFine."
     }
     
     llm = MockLLMService(mock_responses)
@@ -389,3 +392,38 @@ def test_render_agent_section_is_readable_not_json():
     assert "- mercato piccolo" in md                    # lista di stringhe → bullet
     assert "confidence" not in md.lower()               # chiave tecnica omessa
     assert "charts_needed" not in md
+
+
+def test_markdown_to_docx_tables_and_bold(tmp_path):
+    md = (
+        "#### Sotto-sezione\n"
+        "\n"
+        "Un paragrafo con **testo importante** in grassetto.\n"
+        "\n"
+        "| Nome | Ruolo |\n"
+        "| --- | --- |\n"
+        "| **Anna** | CEO |\n"
+        "| Marco | CTO |\n"
+        "\n"
+        "⚠️ Avviso di prova.\n"
+    )
+    with patch("app.services.report_builder.OUTPUT_DIR", tmp_path):
+        out = markdown_to_docx(md, chart_paths=[], output_filename="t.docx")
+
+    doc = Document(out)
+
+    # 1. almeno una tabella vera
+    assert len(doc.tables) > 0
+    table = doc.tables[0]
+    assert table.rows[0].cells[0].text == "Nome"      # header, separatore ignorato
+    assert table.rows[1].cells[0].text == "Anna"      # ** rimossi anche in cella
+
+    # 2. run in grassetto presente nei paragrafi
+    bold_runs = [r.text for p in doc.paragraphs for r in p.runs if r.bold and r.text.strip()]
+    assert "testo importante" in bold_runs
+
+    # 3. nessun asterisco o pipe letterale residuo nei paragrafi o nelle celle
+    para_text = "\n".join(p.text for p in doc.paragraphs)
+    cell_text = "\n".join(c.text for row in table.rows for c in row.cells)
+    assert "*" not in para_text and "|" not in para_text
+    assert "*" not in cell_text and "|" not in cell_text

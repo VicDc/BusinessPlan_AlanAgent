@@ -294,6 +294,8 @@ Schema di output:
 """
 
 ORCHESTRATOR_PROMPT = """
+Usa un ragionamento minimo ed efficiente. Concentrati solo sui passaggi chiave e rispondi direttamente dopo una breve verifica.
+
 Sei il senior partner di un team di consulenza. Hai ricevuto gli output di sei
 agenti specialistici che hanno analizzato un'idea di business.
 
@@ -330,28 +332,9 @@ Per ogni incoerenza trovata:
 - Fornisci una CORRECTION_CONTEXT che spiega esattamente cosa correggere e perché
 - Emetti APPROVED solo quando tutti gli output sono internamente coerenti
 
-STEP 4 — BUSINESS PLAN FINALE (solo se APPROVED)
-Sintetizza tutti gli output in un business plan Markdown unificato con queste
-sezioni:
-1. Executive Summary (max 200 parole)
-2. L'Idea e la Proposta di Valore
-3. Analisi di Mercato e Concorrenza
-4. Il Team
-5. Inquadramento Legale e Operativo
-6. Piano Economico-Finanziario (con riferimenti ai grafici da includere)
-7. Piano di Copertura Finanziaria
-8. Prossimi Passi (azioni immediate nei primi 30 giorni)
-
-Nella sezione 6, indica esplicitamente quali file immagine (dai charts_needed di
-FinancialAgent) vanno incorporati e dove.
-
-STEP 5 — EXECUTIVE REPORT
-Il campo business_plan_markdown deve essere un documento completo,
-minimo 600 parole complessive, con ciascuna delle 8 sezioni sviluppata con
-contenuto reale tratto dagli output degli agenti — non un titolo, un
-placeholder, o un riassunto di poche righe. Un business_plan_markdown sotto
-le 300 parole è considerato un errore di esecuzione da correggere, non un
-output valido.
+Non scrivere il business plan: quello è compito di un altro agente a valle,
+attivato solo dopo il tuo APPROVED. Il tuo output è solo la decisione di
+coerenza — poche centinaia di token.
 
 Output solo JSON valido. Nessun wrapper markdown attorno al JSON.
 
@@ -361,8 +344,37 @@ Schema di output:
   "revisions_needed": [
     {"agent": str, "issue": str, "correction_context": str}
   ],
-  "business_plan_markdown": str,
   "confidence_overall": float,
   "iteration": int
 }
+"""
+
+REPORT_WRITER_PROMPT = """
+Usa un ragionamento minimo ed efficiente. Concentrati solo sui passaggi chiave e rispondi direttamente dopo una breve verifica.
+
+Sei il redattore finale di un team di consulenza. Ricevi gli output — già
+verificati e coerenti — di sei agenti specialistici che hanno analizzato
+un'idea di business. Il controllo di coerenza è già stato fatto da un altro
+agente: NON rifarlo, non cercare incoerenze, non emettere revisioni.
+
+Il tuo unico compito: scrivere il business plan finale in Markdown, con queste
+8 sezioni, ciascuna sviluppata con contenuto reale tratto dagli output degli
+agenti (non titoli vuoti, non placeholder):
+
+1. Executive Summary (max 200 parole)
+2. L'Idea e la Proposta di Valore
+3. Analisi di Mercato e Concorrenza
+4. Il Team
+5. Inquadramento Legale e Operativo
+6. Piano Economico-Finanziario (con riferimenti ai grafici da includere)
+7. Piano di Copertura Finanziaria
+8. Prossimi Passi (azioni immediate nei primi 30 giorni)
+
+Nella sezione 6, indica esplicitamente quali file immagine (dai charts_needed
+di FinancialAgent) vanno incorporati e dove.
+
+Il documento deve essere completo, minimo 600 parole complessive.
+
+Output: SOLO il Markdown del business plan. Nessun JSON, nessun wrapper, nessun
+preambolo, nessun commento tuo prima o dopo.
 """

@@ -22,7 +22,7 @@ successive.
 
 ### Core
 - [x] DONE — `app/core/types.py` (incluso `raw_intake_notes` e `IntakeReport`)
-- [x] DONE — `app/core/prompts.py` (incluso `INTAKE_AGENT_PROMPT`)
+- [x] DONE — `app/core/prompts.py` (incluso `INTAKE_AGENT_PROMPT` e `REPORT_WRITER_PROMPT`)
 - [x] DONE — `app/core/intake_questions.py`
 - [x] DONE — `app/core/exceptions.py`
 
@@ -43,10 +43,11 @@ successive.
 - [x] DONE — `app/agents/orchestrator.py`
 
 ### Servizi
-- [x] DONE — `app/services/llm.py`
+- [x] DONE — `app/services/llm.py` (multi-provider: local / claude_fast / claude_quality)
+- [x] DONE — `app/services/llm_logging.py` (log JSONL chiamate LLM + esiti parsing)
 - [x] DONE — `app/services/charts.py` (rendering deterministico, NON-LLM)
-- [x] DONE — `app/services/web_search.py`
-- [x] DONE — `app/services/report_builder.py`
+- [x] DONE — `app/services/web_search.py` (fallback Serper → Playwright → ddgs)
+- [x] DONE — `app/services/report_builder.py` (DOCX/MD, tabelle/bold, sezioni agente)
 
 ### API e modelli
 - [x] DONE — `app/models/requests.py`, `app/models/responses.py`
@@ -113,10 +114,17 @@ Note ambiente (stesse di OrgTransform AI):
   revision loop esplicito (`MAX_REVISION_CYCLES`). Non introdurre CrewAI o altri
   framework di orchestrazione: l'obiettivo è coerenza architetturale tra i
   progetti, non solo funzionalità.
-- I 5 controlli di coerenza dell'Orchestrator (ricavi vs mercato, costi
+- I 6 controlli di coerenza dell'Orchestrator (ricavi vs mercato, costi
   gestionali completi, affermazioni non dimostrabili, competenze vs ambizione,
-  fabbisogno vs copertura) sono il cuore del sistema — non vanno semplificati
-  o rimossi per "velocizzare" lo sviluppo.
+  fabbisogno vs copertura, fedeltà ai dati dell'utente) sono il cuore del
+  sistema — non vanno semplificati o rimossi per "velocizzare" lo sviluppo.
+- L'Orchestrator NON scrive più il business plan: fa solo i controlli di
+  coerenza e la decisione APPROVED/REVISION_NEEDED. La scrittura del plan è
+  delegata a un secondo agente (`REPORT_WRITER_PROMPT`), invocato solo dopo
+  APPROVED. Motivo: il reasoning forzato di Gemma 4 saturava una singola
+  chiamata che faceva entrambe le cose. Non riunire i due prompt.
+- Ogni chiamata LLM passa da `LLMService.generate()` che logga su
+  `logs/llm_calls.jsonl`. Il provider è scelto da `LLM_PROVIDER` in settings.
 - Nessuna API esterna per la generazione dei grafici. Il rendering è sempre
   locale (Plotly/Matplotlib), coerente con la postura privacy-first del
   progetto gemello OrgTransform AI.

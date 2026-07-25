@@ -113,6 +113,52 @@ def build_draft_markdown(profile, agent_outputs: dict, iteration: int, issues: l
     return "\n".join(lines)
 
 
+def _add_runs_with_bold(paragraph, text: str, force_bold: bool = False) -> None:
+    """Aggiunge `text` a un paragrafo interpretando **...** come run in
+    grassetto. force_bold rende grassetto anche il testo non marcato (celle
+    di intestazione tabella)."""
+    for part in re.split(r"(\*\*.+?\*\*)", text):
+        if not part:
+            continue
+        if part.startswith("**") and part.endswith("**") and len(part) >= 4:
+            paragraph.add_run(part[2:-2]).bold = True
+        else:
+            run = paragraph.add_run(part)
+            if force_bold:
+                run.bold = True
+
+
+def _is_table_row(line: str) -> bool:
+    return line.startswith("|") and line.endswith("|") and len(line) >= 2
+
+
+def _is_separator_row(line: str) -> bool:
+    """Riga separatrice markdown: solo |, -, : e spazi."""
+    return set(line) <= set("|-: ") and "-" in line
+
+
+def _split_row(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _add_table(doc, block: list[str]) -> None:
+    rows = [_split_row(l) for l in block if not _is_separator_row(l)]
+    if not rows:
+        return
+    ncols = max(len(r) for r in rows)
+    table = doc.add_table(rows=len(rows), cols=ncols)
+    try:
+        table.style = "Light Grid Accent 1"
+    except KeyError:
+        table.style = "Table Grid"
+    for ri, row in enumerate(rows):
+        for ci in range(ncols):
+            cell = table.rows[ri].cells[ci]
+            cell.text = ""  # svuota il paragrafo di default
+            _add_runs_with_bold(cell.paragraphs[0], row[ci] if ci < len(row) else "",
+                                force_bold=(ri == 0))
+
+
 def markdown_to_docx(
     markdown_text: str,
     chart_paths: list[str],
@@ -125,22 +171,36 @@ def markdown_to_docx(
     style.font.name = "Arial"
     style.font.size = Pt(11)
 
-    for line in markdown_text.splitlines():
-        line = line.strip()
+    lines = markdown_text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+
+        if _is_table_row(line):
+            block = []
+            while i < len(lines) and _is_table_row(lines[i].strip()):
+                block.append(lines[i].strip())
+                i += 1
+            _add_table(doc, block)
+            continue
+
         if not line:
             doc.add_paragraph("")
-        elif line.startswith("# "):
-            doc.add_heading(line[2:], level=1)
-        elif line.startswith("## "):
-            doc.add_heading(line[3:], level=2)
+        elif line.startswith("#### "):
+            doc.add_heading(line[5:], level=4)
         elif line.startswith("### "):
             doc.add_heading(line[4:], level=3)
+        elif line.startswith("## "):
+            doc.add_heading(line[3:], level=2)
+        elif line.startswith("# "):
+            doc.add_heading(line[2:], level=1)
         elif line.startswith("- ") or line.startswith("* "):
-            doc.add_paragraph(line[2:], style="List Bullet")
+            _add_runs_with_bold(doc.add_paragraph(style="List Bullet"), line[2:])
         elif re.match(r"^\d+\. ", line):
-            doc.add_paragraph(re.sub(r"^\d+\. ", "", line), style="List Number")
+            _add_runs_with_bold(doc.add_paragraph(style="List Number"), re.sub(r"^\d+\. ", "", line))
         else:
-            doc.add_paragraph(line)
+            _add_runs_with_bold(doc.add_paragraph(), line)
+        i += 1
 
     # Incorpora tutti i grafici renderizzati in coda al documento, in una
     # sezione dedicata (semplice e robusto; l'inserimento posizionale nel

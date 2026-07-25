@@ -1,7 +1,7 @@
 # Business Plan AI — Sistema Multi-Agente per la Creazione di Business Plan
 > Spec file per Antigravity IDE — generazione agentica dello scaffold
 > Autore: Vicio Di Cara
-> Versione: 1.0
+> Versione: 1.1 — riallineata al codice reale (vedi CHANGELOG in fondo)
 > Architettura riusata da: `orgtransform_ai_spec.md` (BaseAgent + Orchestrator + revision loop)
 
 ---
@@ -20,9 +20,12 @@ finanziario con grafici, e piano di copertura finanziaria — assemblati in un b
 plan finale (Markdown → DOCX) da un Orchestratore che verifica la coerenza incrociata
 tra gli output.
 
-**Stack:** Python, FastAPI, Pydantic v2, httpx, Plotly + Matplotlib (grafici),
-python-docx (export), Redis (opzionale, memoria sessione), Docker Compose,
-LM Studio / Ollama (LLM locale — Gemma 4 26B QAT, stesso modello di OrgTransform AI)
+**Stack:** Python, FastAPI, Pydantic v2, httpx, Plotly (grafici),
+python-docx (export), Playwright + ddgs (web search fallback), Redis (opzionale,
+memoria sessione), Docker Compose. LLM selezionabile via `LLM_PROVIDER`:
+`local` (LM Studio / Ollama — Gemma 4 26B QAT, default, privacy-first),
+`claude_fast` (Claude Haiku via API Anthropic) o `claude_quality` (Claude Sonnet).
+Ogni chiamata LLM è tracciata su `logs/llm_calls.jsonl` (vedi modulo llm_logging).
 
 **Pattern architetturale:** identico a OrgTransform AI — pipeline multi-agente
 sequenziale + parallela, con Orchestratore che implementa un revision loop
@@ -125,10 +128,11 @@ business-plan-ai/
 │   │   └── responses.py             # DTO output Pydantic
 │   │
 │   ├── services/
-│   │   ├── llm.py                   # Client LM Studio/Ollama (riuso da OrgTransform)
-│   │   ├── charts.py                # Rendering deterministico Plotly/Matplotlib
-│   │   ├── web_search.py            # Serper/DuckDuckGo per Market e Funding
-│   │   ├── report_builder.py        # Markdown → DOCX (python-docx)
+│   │   ├── llm.py                   # Client multi-provider (local / claude_fast / claude_quality)
+│   │   ├── llm_logging.py           # Log JSONL delle chiamate LLM + esiti parsing
+│   │   ├── charts.py                # Rendering deterministico Plotly
+│   │   ├── web_search.py            # Serper → Playwright → ddgs (fallback 3 livelli)
+│   │   ├── report_builder.py        # Markdown → DOCX/MD, tabelle/bold, sezioni agente
 │   │   └── memory.py                # Redis sessione (opzionale)
 │   │
 │   └── config/
@@ -244,9 +248,14 @@ class OrchestratorResult:
     charts_generated: list[str]         # path dei PNG effettivamente renderizzati
     business_plan_markdown: str
     business_plan_docx_path: str
+    business_plan_md_path: str          # il report è salvato anche in .md, non solo .docx
     total_iterations: int
     status: RevisionStatus
 ```
+
+> Nota: `BusinessIdeaProfile.raw_intake_notes` è popolato dall'IntakeAgent dalla
+> chiave `raw_section_notes` del suo output JSON. `OrchestratorResult` espone sia
+> `business_plan_docx_path` sia `business_plan_md_path` (vedi report_builder).
 
 ---
 
@@ -544,13 +553,15 @@ Schema di output:
 """
 
 ORCHESTRATOR_PROMPT = """
+Usa un ragionamento minimo ed efficiente. Concentrati solo sui passaggi chiave e rispondi direttamente dopo una breve verifica.
+
 Sei il senior partner di un team di consulenza. Hai ricevuto gli output di sei
 agenti specialistici che hanno analizzato un'idea di business.
 
 I tuoi compiti, in ordine:
 
 STEP 1 — CONSISTENCY CHECK
-Verifica la coerenza interna tra tutti gli output, in particolare questi 5 controlli
+Verifica la coerenza interna tra tutti gli output, in particolare questi 6 controlli
 (derivati da errori reali osservati in imprenditori alle prime armi):
 
 1. RICAVI VS MERCATO: i ricavi previsti da FinancialAgent superano il SOM stimato
@@ -564,6 +575,11 @@ Verifica la coerenza interna tra tutti gli output, in particolare questi 5 contr
 5. FABBISOGNO VS COPERTURA: il capitale proprio rispetta la regola del 25-30% del
    fabbisogno totale (own_capital_check di FundingAgent)? Se no, e non è già
    segnalato, va evidenziato.
+6. FEDELTÀ AI DATI DELL'UTENTE: le cifre usate da FinancialAgent e
+   FundingAgent (capitale iniziale, costi fissi, prezzi) corrispondono a
+   quelle dichiarate nel profilo dell'utente? Se un agente le ha modificate
+   senza dichiararlo esplicitamente in assumptions, è un'incoerenza da
+   correggere.
 
 STEP 2 — CONTRADDIZIONI DIRETTE
 Identifica altre contraddizioni dirette tra agenti (es. SetupAgent richiede
@@ -575,20 +591,9 @@ Per ogni incoerenza trovata:
 - Fornisci una CORRECTION_CONTEXT che spiega esattamente cosa correggere e perché
 - Emetti APPROVED solo quando tutti gli output sono internamente coerenti
 
-STEP 4 — BUSINESS PLAN FINALE (solo se APPROVED)
-Sintetizza tutti gli output in un business plan Markdown unificato con queste
-sezioni:
-1. Executive Summary (max 200 parole)
-2. L'Idea e la Proposta di Valore
-3. Analisi di Mercato e Concorrenza
-4. Il Team
-5. Inquadramento Legale e Operativo
-6. Piano Economico-Finanziario (con riferimenti ai grafici da includere)
-7. Piano di Copertura Finanziaria
-8. Prossimi Passi (azioni immediate nei prossimi 30 giorni)
-
-Nella sezione 6, indica esplicitamente quali file immagine (dai charts_needed di
-FinancialAgent) vanno incorporati e dove.
+Non scrivere il business plan: quello è compito di un altro agente a valle,
+attivato solo dopo il tuo APPROVED. Il tuo output è solo la decisione di
+coerenza — poche centinaia di token.
 
 Output solo JSON valido. Nessun wrapper markdown attorno al JSON.
 
@@ -598,12 +603,52 @@ Schema di output:
   "revisions_needed": [
     {"agent": str, "issue": str, "correction_context": str}
   ],
-  "business_plan_markdown": str,
   "confidence_overall": float,
   "iteration": int
 }
 """
+
+REPORT_WRITER_PROMPT = """
+Usa un ragionamento minimo ed efficiente. Concentrati solo sui passaggi chiave e rispondi direttamente dopo una breve verifica.
+
+Sei il redattore finale di un team di consulenza. Ricevi gli output — già
+verificati e coerenti — di sei agenti specialistici che hanno analizzato
+un'idea di business. Il controllo di coerenza è già stato fatto da un altro
+agente: NON rifarlo, non cercare incoerenze, non emettere revisioni.
+
+Il tuo unico compito: scrivere il business plan finale in Markdown, con queste
+8 sezioni, ciascuna sviluppata con contenuto reale tratto dagli output degli
+agenti (non titoli vuoti, non placeholder):
+
+1. Executive Summary (max 200 parole)
+2. L'Idea e la Proposta di Valore
+3. Analisi di Mercato e Concorrenza
+4. Il Team
+5. Inquadramento Legale e Operativo
+6. Piano Economico-Finanziario (con riferimenti ai grafici da includere)
+7. Piano di Copertura Finanziaria
+8. Prossimi Passi (azioni immediate nei prossimi 30 giorni)
+
+Nella sezione 6, indica esplicitamente quali file immagine (dai charts_needed
+di FinancialAgent) vanno incorporati e dove.
+
+Il documento deve essere completo, minimo 600 parole complessive.
+
+Output: SOLO il Markdown del business plan. Nessun JSON, nessun wrapper, nessun
+preambolo, nessun commento tuo prima o dopo.
+"""
 ```
+
+> **Perché due prompt separati (Orchestrator + ReportWriter).** Gemma 4 ha il
+> reasoning forzato lato server e non disattivabile dal client. Chiedere in una
+> sola chiamata sia i 6 controlli di coerenza sia la scrittura di un business
+> plan da 8 sezioni saturava il budget di token: il modello restituiva solo
+> reasoning e nessun contenuto. La scrittura è quindi delegata a un secondo
+> agente (`REPORT_WRITER_PROMPT`), invocato dall'Orchestrator solo dopo APPROVED,
+> con `max_tokens=12000`. L'Orchestrator produce ora solo la decisione di
+> coerenza (poche centinaia di token); il campo `business_plan_markdown` è
+> sparito dal suo schema JSON. Entrambi i prompt iniziano con l'istruzione di
+> ragionamento minimo, per la stessa ragione.
 
 ---
 
@@ -978,12 +1023,22 @@ from app.agents.funding_agent import FundingAgent
 from app.core.types import (
     AgentOutput, BusinessIdeaProfile, OrchestratorResult, RevisionStatus
 )
-from app.core.prompts import ORCHESTRATOR_PROMPT
+from app.core.prompts import ORCHESTRATOR_PROMPT, REPORT_WRITER_PROMPT
 from app.services.charts import render_chart_specs
-from app.services.report_builder import markdown_to_docx
+from app.services.report_builder import build_draft_markdown, markdown_to_docx, render_agent_section, save_markdown_report
+from app.services.llm_logging import log_orchestrator_iteration
+from app.config.settings import settings
 
 
-MAX_REVISION_CYCLES = 3
+CANONICAL_AGENTS = ("vision", "market", "team", "setup", "financial", "funding")
+
+
+def _resolve_agents(raw_name: str) -> list[str]:
+    """Estrae uno o più nomi canonici di agente da una stringa arbitraria
+    prodotta dall'LLM. Gestisce maiuscole, underscore, spazi, e riferimenti
+    multipli tipo 'FinancialAgent & TeamAgent'."""
+    normalized = raw_name.lower().replace("_", " ").replace("-", " ").replace("agent", " ")
+    return [name for name in CANONICAL_AGENTS if name in normalized]
 
 
 class Orchestrator:
@@ -998,6 +1053,8 @@ class Orchestrator:
 
     async def run(self, profile: BusinessIdeaProfile) -> OrchestratorResult:
         plan_id = str(uuid.uuid4())[:8]
+        self.llm.run_id = plan_id
+        self.llm.iteration = 1
         revision_log = []
 
         # --- FASE 1: agenti paralleli (nessuna dipendenza tra loro) ---
@@ -1013,10 +1070,12 @@ class Orchestrator:
             "team": team_out.data,
             "setup": setup_out.data
         }
+        self.llm.iteration = 1
         financial_out = await self.financial_agent.process(profile, context=upstream_context)
 
         # --- FASE 3: FundingAgent dipende da Financial ---
         funding_context = {**upstream_context, "financial": financial_out.data}
+        self.llm.iteration = 1
         funding_out = await self.funding_agent.process(profile, context=funding_context)
 
         agent_outputs = {
@@ -1029,12 +1088,14 @@ class Orchestrator:
         }
 
         # --- FASE 4: validation loop dell'Orchestratore ---
-        for iteration in range(1, MAX_REVISION_CYCLES + 1):
+        for iteration in range(1, settings.MAX_REVISION_CYCLES + 1):
+            self.llm.iteration = iteration
             orchestrator_raw = await self.llm.generate(
                 system_prompt=ORCHESTRATOR_PROMPT,
                 user_message=self._build_orchestrator_message(profile, agent_outputs, iteration),
                 temperature=0.1,
-                max_tokens=5000
+                max_tokens=12000,
+                agent_name="Orchestrator"
             )
 
             try:
@@ -1042,15 +1103,76 @@ class Orchestrator:
             except json.JSONDecodeError:
                 break
 
+            # Risolvi i nomi agente delle revisioni (robusto a maiuscole,
+            # underscore, riferimenti multipli). Un nome non riconosciuto NON
+            # viene scartato in silenzio: logga un warning esplicito.
+            grouped = {}
+            revisions_applied = 0  # voci raw con ≥1 agente valido (poi rilanciato)
+            for rev in orch_data.get("revisions_needed", []):
+                raw_name = rev.get("agent", "")
+                resolved = _resolve_agents(raw_name)
+                if not resolved:
+                    print(f"[Orchestrator] Nome agente non riconosciuto: '{raw_name}' — correzione ignorata")
+                    continue
+                revisions_applied += 1
+                ctx = rev.get("correction_context", "")
+                for agent_name in resolved:
+                    grouped.setdefault(agent_name, []).append(ctx)
+
+            revisions = []
+            for agent_name, contexts in grouped.items():
+                if len(contexts) > 1:
+                    correction = "\n\n---\n\n".join(f"Correzione {i}:\n{ctx}" for i, ctx in enumerate(contexts, 1))
+                else:
+                    correction = contexts[0] if contexts else ""
+                revisions.append({
+                    "agent": agent_name,
+                    "correction_context": correction
+                })
+
+            log_orchestrator_iteration(
+                run_id=plan_id,
+                iteration=iteration,
+                final_status=orch_data.get("status", "UNKNOWN"),
+                revisions_needed_count=len(orch_data.get("revisions_needed", [])),
+                agents_flagged=[r["agent"] for r in orch_data.get("revisions_needed", [])],
+                revisions_applied=revisions_applied
+            )
+
+            # Bozza human-readable di ogni iterazione (audit trail)
+            draft_md = build_draft_markdown(
+                profile, agent_outputs, iteration,
+                issues=[r.get("issue", "") for r in orch_data.get("revisions_needed", [])]
+            )
+            save_markdown_report(
+                draft_md, chart_paths=[],
+                output_filename=f"business_plan_{plan_id}_iter{iteration}_draft.md"
+            )
+
             if orch_data.get("status") == "APPROVED":
                 # Rendering deterministico dei grafici — SOLO qui, dopo APPROVED
                 chart_specs = financial_out.data.get("charts_needed", [])
                 charts_generated = render_chart_specs(chart_specs)
 
-                markdown = orch_data.get("business_plan_markdown", "")
+                # Seconda chiamata: la scrittura del business plan è delegata a
+                # un agente dedicato (ReportWriter). L'Orchestrator decide solo
+                # la coerenza; separare le due chiamate evita che Gemma saturi
+                # il budget di reasoning e restituisca un plan vuoto.
+                self.llm.iteration = iteration
+                markdown = await self.llm.generate(
+                    system_prompt=REPORT_WRITER_PROMPT,
+                    user_message=self._build_orchestrator_message(profile, agent_outputs, iteration),
+                    temperature=0.2,
+                    max_tokens=12000,
+                    agent_name="ReportWriter"
+                )
                 docx_path = markdown_to_docx(
                     markdown, chart_paths=charts_generated,
                     output_filename=f"business_plan_{plan_id}.docx"
+                )
+                md_path = save_markdown_report(
+                    markdown, chart_paths=charts_generated,
+                    output_filename=f"business_plan_{plan_id}.md"
                 )
 
                 return OrchestratorResult(
@@ -1061,17 +1183,18 @@ class Orchestrator:
                     charts_generated=charts_generated,
                     business_plan_markdown=markdown,
                     business_plan_docx_path=docx_path,
+                    business_plan_md_path=md_path,
                     total_iterations=iteration,
                     status=RevisionStatus.APPROVED
                 )
 
-            # REVISION_NEEDED: rilancia gli agenti indicati con correction_context
-            revisions = orch_data.get("revisions_needed", [])
+            # REVISION_NEEDED: rilancia gli agenti indicati (già risolti/deduplicati)
             revision_log.append({"iteration": iteration, "revisions": revisions})
 
             for rev in revisions:
-                agent_name = rev["agent"].lower().replace("agent", "").strip()
+                agent_name = rev["agent"]
                 correction = rev["correction_context"]
+                self.llm.iteration = iteration
 
                 if agent_name == "vision":
                     agent_outputs["vision"] = await self.vision_agent.process(
@@ -1097,16 +1220,56 @@ class Orchestrator:
                         context={k: v.data for k, v in agent_outputs.items() if k != "funding"},
                         correction_context=correction)
 
-        # Max iterazioni raggiunte
+            # Riesegui gli agenti a valle se i loro input a monte sono cambiati
+            updated_agents = {rev["agent"] for rev in revisions}
+            if any(a in updated_agents for a in ("vision", "market", "team", "setup")):
+                if "financial" not in updated_agents:
+                    financial_context = {k: v.data for k, v in agent_outputs.items()
+                                         if k in ("vision", "market", "team", "setup")}
+                    self.llm.iteration = iteration
+                    agent_outputs["financial"] = await self.financial_agent.process(
+                        profile, context=financial_context)
+            if any(a in updated_agents for a in ("vision", "market", "team", "setup", "financial")):
+                if "funding" not in updated_agents:
+                    funding_context = {k: v.data for k, v in agent_outputs.items() if k != "funding"}
+                    self.llm.iteration = iteration
+                    agent_outputs["funding"] = await self.funding_agent.process(
+                        profile, context=funding_context)
+
+        # Max iterazioni raggiunte — produce comunque un documento parziale
+        # (report + grafici) con l'ultimo output di ogni agente, marcato come
+        # NON validato, invece di restituire solo una stringa di errore.
+        fallback_sections = [
+            "⚠️ REVISIONE MANUALE RICHIESTA — le sezioni seguenti non sono state "
+            "validate per coerenza dall'Orchestrator dopo il numero massimo di cicli di revisione.\n"
+        ]
+        for agent_key, ao in agent_outputs.items():
+            fallback_sections.append("")
+            fallback_sections.append(render_agent_section(agent_key, ao.data))
+        fallback_markdown = "\n".join(fallback_sections)
+
+        fallback_chart_specs = agent_outputs["financial"].data.get("charts_needed", [])
+        fallback_charts = render_chart_specs(fallback_chart_specs)
+
+        fallback_docx = markdown_to_docx(
+            fallback_markdown, chart_paths=fallback_charts,
+            output_filename=f"business_plan_{plan_id}_partial.docx"
+        )
+        fallback_md = save_markdown_report(
+            fallback_markdown, chart_paths=fallback_charts,
+            output_filename=f"business_plan_{plan_id}_partial.md"
+        )
+
         return OrchestratorResult(
             plan_id=plan_id,
             profile=profile,
             agent_outputs=agent_outputs,
             revision_log=revision_log,
-            charts_generated=[],
-            business_plan_markdown="Numero massimo di cicli di revisione raggiunto. Revisione manuale richiesta.",
-            business_plan_docx_path="",
-            total_iterations=MAX_REVISION_CYCLES,
+            charts_generated=fallback_charts,
+            business_plan_markdown=fallback_markdown,
+            business_plan_docx_path=fallback_docx,
+            business_plan_md_path=fallback_md,
+            total_iterations=settings.MAX_REVISION_CYCLES,
             status=RevisionStatus.REVISION_NEEDED
         )
 
@@ -1216,25 +1379,54 @@ def _render_single(spec: dict) -> str:
 
 ## LLM SERVICE (riuso identico da OrgTransform AI) — app/services/llm.py
 
+Client provider-agnostic. Il provider è scelto da `settings.LLM_PROVIDER`:
+- `local` → LM Studio / Ollama (`LLM_BASE_URL` + `LLM_MODEL`), nessun header auth
+- `claude_fast` → API Anthropic, modello `claude-haiku-4-5-20251001`
+- `claude_quality` → API Anthropic, modello `claude-sonnet-5`
+
+Tutti parlano la stessa API OpenAI-compatible (`/chat/completions`). Ogni
+chiamata è cronometrata (`Timer`) e loggata su `llm_calls.jsonl` in un blocco
+`finally` (anche in caso di errore), con token usage e latenza. Il payload
+include `chat_template_kwargs={"enable_thinking": False}` per tentare di
+disattivare il thinking lato server; se il modello restituisce comunque solo
+`reasoning_content` e nessun `content`, `generate()` solleva un errore
+esplicito che indica di disattivare il thinking nel template di LM Studio.
+
 ```python
 import httpx
 from app.config.settings import settings
+from app.services.llm_logging import log_llm_call, new_call_id, Timer
 
 
 class LLMService:
-    """
-    Client provider-agnostic. Si connette a LM Studio o Ollama via API
-    OpenAI-compatible. Stesso servizio già usato in OrgTransform AI —
-    riusalo tale e quale, non serve reimplementarlo.
-    """
-
     def __init__(self):
-        self.base_url = settings.LLM_BASE_URL
-        self.model = settings.LLM_MODEL
+        provider = settings.LLM_PROVIDER
+        if provider == "local":
+            self.base_url = settings.LLM_BASE_URL
+            self.model = settings.LLM_MODEL
+            self._headers: dict = {}
+        elif provider == "claude_fast":
+            self.base_url = "https://api.anthropic.com/v1"
+            self.model = "claude-haiku-4-5-20251001"
+            self._headers = {"Authorization": f"Bearer {settings.ANTHROPIC_API_KEY}"}
+        elif provider == "claude_quality":
+            self.base_url = "https://api.anthropic.com/v1"
+            self.model = "claude-sonnet-5"
+            self._headers = {"Authorization": f"Bearer {settings.ANTHROPIC_API_KEY}"}
+        else:
+            raise ValueError(
+                f"LLM_PROVIDER non valido: '{provider}'. "
+                "Valori accettati: 'local', 'claude_fast', 'claude_quality'."
+            )
+        # Impostati dall'Orchestrator per correlare i log alla run/iterazione
+        self.run_id: str | None = None
+        self.iteration: int | None = None
+        self.last_call_id: str | None = None
 
     async def generate(
         self, system_prompt: str, user_message: str,
-        temperature: float = 0.2, max_tokens: int = 2000
+        temperature: float = 0.2, max_tokens: int = 2000,
+        agent_name: str | None = None
     ) -> str:
         payload = {
             "model": self.model,
@@ -1243,14 +1435,55 @@ class LLMService:
                 {"role": "user", "content": user_message}
             ],
             "temperature": temperature,
-            "max_tokens": max_tokens
+            "max_tokens": max_tokens,
+            "chat_template_kwargs": {"enable_thinking": False}
         }
-        async with httpx.AsyncClient(timeout=600.0) as client:
-            response = await client.post(f"{self.base_url}/chat/completions", json=payload)
-            response.raise_for_status()
-            data = response.json()
-            content = data["choices"][0]["message"]["content"]
-            return _strip_code_fence(content)
+
+        call_id = new_call_id()
+        self.last_call_id = call_id
+        error_msg = None
+        prompt_tokens = completion_tokens = total_tokens = None
+        latency_seconds = 0.0
+
+        try:
+            with Timer() as timer:
+                async with httpx.AsyncClient(timeout=3600.0) as client:
+                    response = await client.post(
+                        f"{self.base_url}/chat/completions", json=payload, headers=self._headers)
+                    response.raise_for_status()
+                    data = response.json()
+                    message = data["choices"][0]["message"]
+                    content = message["content"]
+
+                    if not content or not content.strip():
+                        reasoning_content = message.get("reasoning_content")
+                        if reasoning_content:
+                            raise ValueError(
+                                f"Il modello ha prodotto solo reasoning_content "
+                                f"({len(reasoning_content)} token) e nessun contenuto: "
+                                "la modalità thinking è probabilmente attiva lato server. "
+                                "Disattivala nel prompt template del modello in LM Studio."
+                            )
+                        raise ValueError("Risposta vuota dal modello")
+
+                    usage = data.get("usage") or {}
+                    prompt_tokens = usage.get("prompt_tokens")
+                    completion_tokens = usage.get("completion_tokens")
+                    total_tokens = usage.get("total_tokens")
+
+                    return _strip_code_fence(content)
+        except Exception as e:
+            error_msg = str(e)
+            raise
+        finally:
+            latency_seconds = timer.elapsed if 'timer' in locals() else 0.0
+            log_llm_call(
+                call_id=call_id, run_id=self.run_id, agent_name=agent_name,
+                iteration=self.iteration, model=self.model, temperature=temperature,
+                max_tokens=max_tokens, latency_seconds=latency_seconds,
+                prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                total_tokens=total_tokens, error=error_msg
+            )
 
 
 def _strip_code_fence(text: str) -> str:
@@ -1265,6 +1498,23 @@ def _strip_code_fence(text: str) -> str:
         text = "\n".join(lines)
     return text.strip()
 ```
+
+> **Nuovo modulo — app/services/llm_logging.py.** Ogni chiamata LLM e ogni
+> esito di parsing sono tracciati in `logs/llm_calls.jsonl` (append, una riga
+> JSON per evento). Tre tipi di riga (`"type"`):
+> - `llm_call` — una chiamata al modello: `call_id`, `run_id`, `agent_name`,
+>   `iteration`, `model`, `temperature`, `max_tokens`, `latency_seconds`, token
+>   usage (`prompt/completion/total_tokens`), `error`.
+> - `agent_result` — esito del parsing dell'output di un agente: `json_valid`,
+>   `status`, `confidence`, `is_revision`.
+> - `orchestrator_iteration` — stato di un giro del revision loop:
+>   `final_status`, `revisions_needed_count`, `agents_flagged`, `revisions_applied`.
+>
+> In più, `log_failed_raw_response(call_id, raw_text)` salva il testo grezzo di
+> una risposta che ha fallito il parsing JSON in `logs/failed_responses/<call_id>.txt`
+> per diagnosi. `Timer` è un context manager per la latenza; `new_call_id()`
+> genera un id esadecimale a 12 caratteri. La scrittura è best-effort: se il
+> disco non è scrivibile logga un warning su stderr e prosegue.
 
 ---
 
@@ -1291,9 +1541,16 @@ class WebSearchService:
         self.serper_api_key = os.getenv("SERPER_API_KEY")
 
     async def search(self, query: str, max_results: int = 5) -> list[dict]:
+        # Fallback a tre livelli: Serper (se c'è la key) → scraping Playwright
+        # su DuckDuckGo HTML → libreria ddgs. Ogni livello copre i buchi del
+        # precedente (Serper costa/ha limiti, Playwright dipende dal browser,
+        # ddgs è l'ultima spiaggia senza dipendenze pesanti).
         if self.serper_api_key:
             return await self._search_serper(query, max_results)
-        return await self._search_duckduckgo(query, max_results)
+        try:
+            return await self._search_playwright(query, max_results)
+        except Exception:
+            return await self._search_duckduckgo(query, max_results)
 
     async def _search_serper(self, query: str, max_results: int) -> list[dict]:
         import httpx
@@ -1310,8 +1567,32 @@ class WebSearchService:
                 for r in data.get("organic", [])
             ]
 
+    async def _search_playwright(self, query: str, max_results: int) -> list[dict]:
+        from playwright.async_api import async_playwright
+        import urllib.parse
+
+        encoded_query = urllib.parse.quote_plus(query)
+        results = []
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            try:
+                page = await browser.new_page()
+                await page.goto(f"https://duckduckgo.com/html/?q={encoded_query}", timeout=30000)
+                elements = await page.query_selector_all(".result")
+                for el in elements[:max_results]:
+                    title_el = await el.query_selector(".result__title")
+                    snippet_el = await el.query_selector(".result__snippet")
+                    link_el = await el.query_selector(".result__title a")
+                    title = (await title_el.inner_text()).strip() if title_el else ""
+                    snippet = (await snippet_el.inner_text()).strip() if snippet_el else ""
+                    link = (await link_el.get_attribute("href") or "").strip() if link_el else ""
+                    results.append({"title": title, "snippet": snippet, "link": link})
+            finally:
+                await browser.close()
+        return results
+
     async def _search_duckduckgo(self, query: str, max_results: int) -> list[dict]:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS   # ex 'duckduckgo_search', rinominato in 'ddgs'
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
         return [
@@ -1324,12 +1605,30 @@ class WebSearchService:
 
 ## REPORT BUILDER — app/services/report_builder.py
 
+Il modulo fa quattro cose, non più solo la conversione DOCX:
+
+1. **`markdown_to_docx(markdown_text, chart_paths, output_filename)`** — converte
+   Markdown in DOCX. Oltre a heading `#`/`##`/`###`, bullet e paragrafi, ora
+   gestisce: **heading di 4° livello** (`#### `), **tabelle** (blocchi di righe
+   `|...|`, riga separatrice ignorata, prima riga come header in grassetto, stile
+   `"Light Grid Accent 1"` con fallback `"Table Grid"`) e **grassetto inline**
+   `**testo**` reso come run in grassetto (anche nelle celle). I grafici
+   renderizzati sono incorporati in coda in una sezione "Grafici e Proiezioni".
+2. **`save_markdown_report(markdown_text, chart_paths, output_filename)`** — salva
+   lo stesso report anche come `.md` (con i grafici come link immagine
+   `file:///...`). Usato sia per l'output finale sia per le bozze di ogni
+   iterazione del revision loop.
+3. **`render_agent_section(agent_key, data)`** — converte il dict di output di un
+   agente in Markdown leggibile (chiavi snake_case → titoli Title Case; liste di
+   dict omogenee → tabelle; liste di stringhe → bullet; scalari → `**Chiave:**
+   valore`; dict annidati → sottosezioni). Omette sempre le chiavi tecniche
+   `confidence` e `charts_needed`.
+4. **`build_draft_markdown(profile, agent_outputs, iteration, issues)`** — assembla
+   un business plan PARZIALE con l'ultimo output di ogni agente e i problemi
+   segnalati nell'iterazione. È la base del report di fallback quando il revision
+   loop non converge.
+
 ```python
-"""
-Converte il business plan Markdown finale in DOCX, incorporando i grafici
-già renderizzati da charts.py. Riuso adattato di
-src/tools/docx_writer.py da strategic-consulting-crew.
-"""
 from __future__ import annotations
 
 import os
@@ -1340,6 +1639,51 @@ from docx import Document
 from docx.shared import Inches, Pt
 
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output")) / "reports"
+
+
+def _add_runs_with_bold(paragraph, text: str, force_bold: bool = False) -> None:
+    """Aggiunge `text` a un paragrafo interpretando **...** come run in grassetto.
+    force_bold rende grassetto anche il testo non marcato (celle di header)."""
+    for part in re.split(r"(\*\*.+?\*\*)", text):
+        if not part:
+            continue
+        if part.startswith("**") and part.endswith("**") and len(part) >= 4:
+            paragraph.add_run(part[2:-2]).bold = True
+        else:
+            run = paragraph.add_run(part)
+            if force_bold:
+                run.bold = True
+
+
+def _is_table_row(line: str) -> bool:
+    return line.startswith("|") and line.endswith("|") and len(line) >= 2
+
+
+def _is_separator_row(line: str) -> bool:
+    """Riga separatrice markdown: solo |, -, : e spazi."""
+    return set(line) <= set("|-: ") and "-" in line
+
+
+def _split_row(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _add_table(doc, block: list[str]) -> None:
+    rows = [_split_row(l) for l in block if not _is_separator_row(l)]
+    if not rows:
+        return
+    ncols = max(len(r) for r in rows)
+    table = doc.add_table(rows=len(rows), cols=ncols)
+    try:
+        table.style = "Light Grid Accent 1"
+    except KeyError:
+        table.style = "Table Grid"
+    for ri, row in enumerate(rows):
+        for ci in range(ncols):
+            cell = table.rows[ri].cells[ci]
+            cell.text = ""  # svuota il paragrafo di default
+            _add_runs_with_bold(cell.paragraphs[0], row[ci] if ci < len(row) else "",
+                                force_bold=(ri == 0))
 
 
 def markdown_to_docx(
@@ -1354,26 +1698,37 @@ def markdown_to_docx(
     style.font.name = "Arial"
     style.font.size = Pt(11)
 
-    for line in markdown_text.splitlines():
-        line = line.strip()
+    lines = markdown_text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+
+        if _is_table_row(line):
+            block = []
+            while i < len(lines) and _is_table_row(lines[i].strip()):
+                block.append(lines[i].strip())
+                i += 1
+            _add_table(doc, block)
+            continue
+
         if not line:
             doc.add_paragraph("")
-        elif line.startswith("# "):
-            doc.add_heading(line[2:], level=1)
-        elif line.startswith("## "):
-            doc.add_heading(line[3:], level=2)
+        elif line.startswith("#### "):
+            doc.add_heading(line[5:], level=4)
         elif line.startswith("### "):
             doc.add_heading(line[4:], level=3)
+        elif line.startswith("## "):
+            doc.add_heading(line[3:], level=2)
+        elif line.startswith("# "):
+            doc.add_heading(line[2:], level=1)
         elif line.startswith("- ") or line.startswith("* "):
-            doc.add_paragraph(line[2:], style="List Bullet")
+            _add_runs_with_bold(doc.add_paragraph(style="List Bullet"), line[2:])
         elif re.match(r"^\d+\. ", line):
-            doc.add_paragraph(re.sub(r"^\d+\. ", "", line), style="List Number")
+            _add_runs_with_bold(doc.add_paragraph(style="List Number"), re.sub(r"^\d+\. ", "", line))
         else:
-            doc.add_paragraph(line)
+            _add_runs_with_bold(doc.add_paragraph(), line)
+        i += 1
 
-    # Incorpora tutti i grafici renderizzati in coda al documento, in una
-    # sezione dedicata (semplice e robusto; l'inserimento posizionale nel
-    # testo può essere raffinato in una versione successiva)
     if chart_paths:
         doc.add_heading("Grafici e Proiezioni", level=1)
         for path in chart_paths:
@@ -1383,6 +1738,10 @@ def markdown_to_docx(
     output_path = OUTPUT_DIR / output_filename
     doc.save(str(output_path))
     return str(output_path)
+
+
+# Anche: save_markdown_report(...), render_agent_section(...),
+# build_draft_markdown(...) — vedi descrizione sopra e il file reale.
 ```
 
 ---
@@ -1399,7 +1758,7 @@ from app.models.responses import IntakeParseResponse
 router = APIRouter(prefix="/api/v1/intake", tags=["intake"])
 
 
-@router.get("/template", response_class=str)
+@router.get("/template")
 async def get_intake_template():
     agent = IntakeAgent(LLMService())
     return agent.generate_template_markdown()
@@ -1410,7 +1769,7 @@ async def parse_intake(request: IntakeParseRequest):
     agent = IntakeAgent(LLMService())
     report = await agent.parse_brief(request.raw_markdown)
     return IntakeParseResponse(
-        profile=report.profile.__dict__,
+        profile=report.profile,
         needs_clarification=report.needs_clarification,
         summary_markdown=report.summary_markdown,
         confidence=report.confidence
@@ -1467,6 +1826,7 @@ async def create_business_plan(request: BusinessPlanRequest):
         status=result.status.value,
         business_plan_markdown=result.business_plan_markdown,
         docx_path=result.business_plan_docx_path,
+        md_path=result.business_plan_md_path,
         charts_generated=result.charts_generated,
         revision_cycles=result.total_iterations,
         agent_outputs={k: v.data for k, v in result.agent_outputs.items()}
@@ -1533,9 +1893,16 @@ class IntakeParseResponse(BaseModel):
     summary_markdown: str
     confidence: float
 
-# BusinessPlanResponse: vedi utilizzo in api/v1/business_plan.py — stessa
-# forma di AssessmentResponse in orgtransform-ai, adattata ai campi di
-# OrchestratorResult (plan_id, business_plan_markdown, docx_path, ecc.)
+
+class BusinessPlanResponse(BaseModel):
+    plan_id: str
+    status: str
+    business_plan_markdown: str
+    docx_path: str
+    md_path: str                       # il report è servito anche in .md
+    charts_generated: list[str]
+    revision_cycles: int
+    agent_outputs: dict[str, dict]
 ```
 
 ---
@@ -1550,6 +1917,8 @@ class Settings(BaseSettings):
     # LLM
     LLM_BASE_URL: str = "http://localhost:1234/v1"
     LLM_MODEL: str = "gemma-4-26b"
+    LLM_PROVIDER: str = "local"   # "local" | "claude_fast" | "claude_quality"
+    ANTHROPIC_API_KEY: str = ""
 
     # Web search
     SERPER_API_KEY: str = ""
@@ -1570,6 +1939,7 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "ignore"
 
 
 settings = Settings()
@@ -1582,6 +1952,8 @@ settings = Settings()
 ```
 LLM_BASE_URL=http://localhost:1234/v1
 LLM_MODEL=gemma-4-26b
+LLM_PROVIDER=local          # local | claude_fast | claude_quality
+ANTHROPIC_API_KEY=          # richiesto solo per claude_fast / claude_quality
 SERPER_API_KEY=
 OUTPUT_DIR=output
 REDIS_URL=redis://localhost:6379/0
@@ -1642,8 +2014,18 @@ python-dotenv>=1.0.0
 plotly>=5.0.0
 kaleido>=0.2.1
 python-docx>=1.1.0
-duckduckgo-search>=6.0.0
+ddgs>=1.0.0            # ex duckduckgo-search, rinominato
+playwright>=1.40.0     # fallback web search di 2° livello
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+typer>=0.9.0
+rich>=13.0.0
+pandas>=2.0.0
 ```
+
+> Nota: dopo `pip install`, per il fallback Playwright serve anche
+> `playwright install chromium`. Se il browser non è installato, la ricerca
+> ricade automaticamente su `ddgs`.
 
 ---
 
@@ -1652,6 +2034,9 @@ duckduckgo-search>=6.0.0
 ```python
 from fastapi import FastAPI
 from app.api.v1.business_plan import router as business_plan_router
+from app.api.v1.intake import router as intake_router
+from app.api.v1.report import router as report_router
+from app.api.v1.health import router as health_router
 
 app = FastAPI(
     title="Business Plan AI",
@@ -1660,12 +2045,15 @@ app = FastAPI(
 )
 
 app.include_router(business_plan_router)
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "Business Plan AI"}
+app.include_router(intake_router)
+app.include_router(report_router)
+app.include_router(health_router)
 ```
+
+> Tutti e quattro i router sono montati. `health.py` espone `GET /health`;
+> `report.py` espone `GET /api/v1/report/{plan_id}` che scarica il DOCX
+> generato; `intake.py` espone `GET /api/v1/intake/template` e
+> `POST /api/v1/intake/parse`.
 
 ---
 
@@ -1699,6 +2087,93 @@ async def health():
   per abbassare la barriera d'ingresso quando l'utente non sa da dove partire
   (discusso ma non ancora specificato in dettaglio in questa v1.0)
 - [ ] Test suite pytest (stesso standard delle 43 unit test di OrgTransform AI)
+
+---
+
+## CHANGELOG — modifiche rispetto alla v1.0 originale
+
+Questa sezione traccia ciò che è cambiato tra la spec v1.0 (scaffold iniziale)
+e il codice reale attuale (v1.1). Serve a mantenere la storia delle decisioni.
+
+### LLM multi-provider (`app/services/llm.py`, `settings.py`)
+- Aggiunto `LLM_PROVIDER` con tre valori: `local` (LM Studio/Ollama, default,
+  privacy-first), `claude_fast` (Claude Haiku via API Anthropic), `claude_quality`
+  (Claude Sonnet). `local` resta il default per non rompere la postura GDPR.
+- Aggiunto `ANTHROPIC_API_KEY` in settings e `.env.example`; `extra = "ignore"`
+  nella config per tollerare variabili d'ambiente extra.
+- Il payload include `chat_template_kwargs={"enable_thinking": False}`; se il
+  modello restituisce solo `reasoning_content` senza `content`, `generate()`
+  solleva un errore diagnostico esplicito.
+
+### Logging strutturato (nuovo modulo `app/services/llm_logging.py`)
+- Ogni chiamata LLM è cronometrata e loggata su `logs/llm_calls.jsonl`.
+- Tre tipi di riga: `llm_call` (latenza, token, error), `agent_result`
+  (json_valid, status, confidence, is_revision), `orchestrator_iteration`
+  (final_status, revisions_needed_count, agents_flagged, revisions_applied).
+- `log_failed_raw_response()` salva le risposte non-JSON in
+  `logs/failed_responses/<call_id>.txt`. Tutti gli agenti e l'IntakeAgent
+  loggano il proprio esito di parsing.
+
+### Web search a tre livelli (`app/services/web_search.py`)
+- Fallback: Serper (se c'è la key) → scraping Playwright su DuckDuckGo HTML →
+  libreria `ddgs`. In v1.0 erano solo due livelli (Serper → DuckDuckGo).
+- La dipendenza `duckduckgo-search` è stata rinominata in `ddgs`; aggiunta
+  `playwright` (richiede `playwright install chromium`).
+
+### Separazione Orchestrator / ReportWriter (`prompts.py`, `orchestrator.py`)
+- **Motivo**: Gemma 4 ha il reasoning forzato lato server. Chiedere in una sola
+  chiamata i controlli di coerenza E la scrittura del business plan saturava il
+  budget di token → output vuoto (solo reasoning).
+- `ORCHESTRATOR_PROMPT` ora fa SOLO i controlli di coerenza + decisione
+  APPROVED/REVISION_NEEDED (poche centinaia di token). Rimossi STEP 4 (scrittura
+  plan) e STEP 5 (executive report); rimosso `business_plan_markdown` dal suo
+  schema JSON.
+- Nuovo `REPORT_WRITER_PROMPT`: riceve gli output già validati e produce SOLO il
+  business plan Markdown (8 sezioni, nessun JSON). Invocato dall'Orchestrator con
+  una seconda chiamata (`agent_name="ReportWriter"`, `max_tokens=12000`) dopo
+  APPROVED.
+- Entrambi i prompt iniziano con l'istruzione di "ragionamento minimo ed
+  efficiente" per liberare budget di token.
+
+### 6° controllo di coerenza
+- Aggiunto controllo **FEDELTÀ AI DATI DELL'UTENTE**: le cifre di Financial/Funding
+  devono corrispondere al profilo utente, salvo modifiche dichiarate in
+  `assumptions`. I controlli passano da 5 a 6.
+
+### Orchestrator più robusto (`app/agents/orchestrator.py`)
+- `_resolve_agents()`: risolve nomi agente arbitrari dall'LLM (maiuscole,
+  underscore, riferimenti multipli come "FinancialAgent & TeamAgent"). I nomi non
+  riconosciuti sono loggati, non scartati in silenzio.
+- `revisions_applied`: conteggio delle correzioni effettivamente applicate, nel
+  log dell'iterazione. Correzioni multiple sullo stesso agente sono raggruppate.
+- `MAX_REVISION_CYCLES` letto da `settings` (non più costante a modulo).
+- Rilancio automatico degli agenti a valle (Financial/Funding) quando i loro
+  input a monte cambiano in un ciclo di revisione.
+- **Ramo fallback**: al raggiungimento del numero massimo di cicli, invece di una
+  sola stringa di errore, produce un report PARZIALE (`render_agent_section` per
+  ogni agente) con i grafici renderizzati, marcato "REVISIONE MANUALE RICHIESTA",
+  in DOCX e MD.
+- Bozza `.md` salvata a ogni iterazione (`build_draft_markdown` +
+  `save_markdown_report`) come audit trail.
+
+### Output anche in Markdown (`types.py`, `report_builder.py`, API)
+- `OrchestratorResult.business_plan_md_path` e `BusinessPlanResponse.md_path`:
+  il report è salvato/servito anche in `.md`, non solo `.docx`.
+- Nuova `save_markdown_report()`; nuova `render_agent_section()` (dict agente →
+  Markdown leggibile, omette chiavi tecniche); nuova `build_draft_markdown()`.
+
+### markdown_to_docx più ricco (`report_builder.py`)
+- Supporto **tabelle** (`doc.add_table`, header in grassetto, stile "Light Grid
+  Accent 1" con fallback "Table Grid"), **grassetto inline** `**testo**` (anche
+  nelle celle) e **heading di 4° livello** `#### `. Prima gestiva solo
+  heading 1-3, bullet e paragrafi.
+
+### API e struttura
+- `main.py` monta tutti e quattro i router (business_plan, intake, report,
+  health); in v1.0 ne era mostrato solo uno.
+- Endpoint reali: `GET /health`, `GET /api/v1/report/{plan_id}` (download DOCX),
+  `GET /api/v1/intake/template`, `POST /api/v1/intake/parse`,
+  `POST /api/v1/business-plan`.
 
 ---
 
