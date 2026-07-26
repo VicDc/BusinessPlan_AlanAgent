@@ -205,6 +205,10 @@ def markdown_to_docx(
     # Incorpora tutti i grafici renderizzati in coda al documento, in una
     # sezione dedicata (semplice e robusto; l'inserimento posizionale nel
     # testo può essere raffinato in una versione successiva)
+    # ponytail: i grafici finiscono TUTTI in coda ("Grafici e Proiezioni"),
+    # non nei punti che il ReportWriter indica nella sezione 6 del markdown.
+    # Limite noto e accettato: il posizionamento inline richiederebbe di
+    # matchare i riferimenti ai filename nel testo — upgrade se serve.
     if chart_paths:
         doc.add_heading("Grafici e Proiezioni", level=1)
         for path in chart_paths:

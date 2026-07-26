@@ -17,3 +17,4 @@ class BusinessPlanResponse(BaseModel):
     charts_generated: list[str]
     revision_cycles: int
     agent_outputs: dict[str, dict]
+    validation_xlsx_path: str = ""

@@ -212,7 +212,9 @@ Dato il piano (idea, mercato, team, setup legale), produci:
 2. PRICING: prezzo di vendita proposto e margine per unità
 3. BREAK_EVEN: volume di vendita necessario per coprire i costi fissi
 4. SCENARIOS: proiezioni a 3 anni in scenario base/ottimistico/pessimistico
-5. INITIAL_CAPITAL: capitale iniziale necessario, voce per voce
+5. INITIAL_CAPITAL: capitale iniziale necessario, voce per voce. Fornisci anche
+   initial_capital_total_eur = somma esatta delle voci (deve combaciare con la
+   somma di initial_capital; se le due cifre divergono è un errore da correggere).
 6. PAYBACK_PERIOD: stima prudente del tempo di recupero dell'investimento
 7. ASSUMPTIONS: lista esplicita di tutte le assunzioni usate (non nasconderle
    nei numeri arrotondati)
@@ -245,6 +247,7 @@ Schema di output:
     {"scenario": str, "year1_revenue_eur": float, "year2_revenue_eur": float, "year3_revenue_eur": float}
   ],
   "initial_capital": [{"item": str, "amount_eur": float}],
+  "initial_capital_total_eur": float,
   "payback_period_months": str,
   "assumptions": [str],
   "charts_needed": [

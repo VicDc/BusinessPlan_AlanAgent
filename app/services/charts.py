@@ -59,6 +59,6 @@ def _render_single(spec: dict) -> str:
         raise ValueError(f"chart_type non supportato: {chart_type}")
 
     fig.update_layout(title=title)
-    path = CHARTS_DIR / f"{filename}.png"
+    path = CHARTS_DIR / f"{Path(filename).stem}.png"
     fig.write_image(str(path))
     return str(path)

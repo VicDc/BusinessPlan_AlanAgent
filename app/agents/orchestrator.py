@@ -139,7 +139,7 @@ class Orchestrator:
 
             if orch_data.get("status") == "APPROVED":
                 # Rendering deterministico dei grafici — SOLO qui, dopo APPROVED
-                chart_specs = financial_out.data.get("charts_needed", [])
+                chart_specs = agent_outputs["financial"].data.get("charts_needed", [])
                 charts_generated = render_chart_specs(chart_specs)
 
                 # Seconda chiamata: la scrittura del business plan è delegata a

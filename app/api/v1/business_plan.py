@@ -41,5 +41,6 @@ async def create_business_plan(request: BusinessPlanRequest):
         md_path=result.business_plan_md_path,
         charts_generated=result.charts_generated,
         revision_cycles=result.total_iterations,
-        agent_outputs={k: v.data for k, v in result.agent_outputs.items()}
+        agent_outputs={k: v.data for k, v in result.agent_outputs.items()},
+        validation_xlsx_path=result.validation_xlsx_path
     )
