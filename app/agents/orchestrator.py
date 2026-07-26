@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 from app.agents.vision_agent import VisionAgent
 from app.agents.market_agent import MarketAgent
@@ -11,7 +12,9 @@ from app.core.types import (
 )
 from app.core.prompts import ORCHESTRATOR_PROMPT, REPORT_WRITER_PROMPT
 from app.services.charts import render_chart_specs
+from app.services import report_builder
 from app.services.report_builder import build_draft_markdown, markdown_to_docx, render_agent_section, save_markdown_report
+from app.services.financial_validation import validate_financials, export_validation_xlsx, validation_to_markdown
 from app.services.llm_logging import log_orchestrator_iteration
 from app.config.settings import settings
 
@@ -151,6 +154,11 @@ class Orchestrator:
                     max_tokens=12000,
                     agent_name="ReportWriter"
                 )
+                # Verifica aritmetica deterministica (step separato, fuori dal
+                # revision loop). Augmenta il markdown prima di docx/md così la
+                # sezione finisce in entrambi.
+                markdown, validation_xlsx = self._run_validation(
+                    profile, agent_outputs, plan_id, markdown)
                 docx_path = markdown_to_docx(
                     markdown, chart_paths=charts_generated,
                     output_filename=f"business_plan_{plan_id}.docx"
@@ -170,7 +178,8 @@ class Orchestrator:
                     business_plan_docx_path=docx_path,
                     business_plan_md_path=md_path,
                     total_iterations=iteration,
-                    status=RevisionStatus.APPROVED
+                    status=RevisionStatus.APPROVED,
+                    validation_xlsx_path=validation_xlsx
                 )
 
             # REVISION_NEEDED: rilancia gli agenti indicati con correction_context
@@ -237,6 +246,10 @@ class Orchestrator:
             fallback_sections.append(render_agent_section(agent_key, ao.data))
         fallback_markdown = "\n".join(fallback_sections)
 
+        # Verifica aritmetica anche nel ramo parziale (mai far fallire la consegna).
+        fallback_markdown, validation_xlsx = self._run_validation(
+            profile, agent_outputs, plan_id, fallback_markdown)
+
         # Anche il report parziale merita i grafici: stesso rendering deterministico
         # del ramo APPROVED, sulle charts_needed prodotte da FinancialAgent.
         fallback_chart_specs = agent_outputs["financial"].data.get("charts_needed", [])
@@ -261,8 +274,30 @@ class Orchestrator:
             business_plan_docx_path=fallback_docx,
             business_plan_md_path=fallback_md,
             total_iterations=settings.MAX_REVISION_CYCLES,
-            status=RevisionStatus.REVISION_NEEDED
+            status=RevisionStatus.REVISION_NEEDED,
+            validation_xlsx_path=validation_xlsx
         )
+
+    def _run_validation(self, profile, agent_outputs, plan_id, markdown):
+        """Verifica aritmetica deterministica dei numeri finanziari. Non deve
+        mai far fallire la consegna del report: qualsiasi errore ricade in
+        (markdown invariato, "")."""
+        try:
+            financial_data = agent_outputs["financial"].data
+            funding_data = {**agent_outputs["funding"].data,
+                            "available_capital_eur": profile.available_capital_eur}
+            market_data = agent_outputs["market"].data
+            result = validate_financials(financial_data, funding_data, market_data)
+
+            slug = re.sub(r"[^a-z0-9]+", "_", profile.project_name.lower()).strip("_") or "plan"
+            xlsx_path = export_validation_xlsx(
+                result,
+                str(report_builder.OUTPUT_DIR / f"business_plan_{plan_id}_{slug}_validation.xlsx")
+            )
+            return markdown + "\n\n" + validation_to_markdown(result), xlsx_path
+        except Exception as exc:
+            print(f"[Orchestrator] verifica finanziaria fallita: {exc}")
+            return markdown, ""
 
     def _build_orchestrator_message(
         self, profile: BusinessIdeaProfile, outputs: dict[str, AgentOutput], iteration: int

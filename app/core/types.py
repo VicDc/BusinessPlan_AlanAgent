@@ -75,3 +75,4 @@ class OrchestratorResult:
     business_plan_md_path: str
     total_iterations: int
     status: RevisionStatus
+    validation_xlsx_path: str = ""
