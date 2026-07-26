@@ -21,10 +21,12 @@ plan finale (Markdown → DOCX) da un Orchestratore che verifica la coerenza inc
 tra gli output.
 
 **Stack:** Python, FastAPI, Pydantic v2, httpx, Plotly (grafici),
-python-docx (export), Playwright + ddgs (web search fallback), Redis (opzionale,
-memoria sessione), Docker Compose. LLM selezionabile via `LLM_PROVIDER`:
-`local` (LM Studio / Ollama — Gemma 4 26B QAT, default, privacy-first),
-`claude_fast` (Claude Haiku via API Anthropic) o `claude_quality` (Claude Sonnet).
+python-docx (export DOCX), openpyxl (export xlsx della verifica finanziaria),
+Playwright + ddgs (web search fallback), Docker Compose. LLM selezionabile via
+`LLM_PROVIDER`: `local` (LM Studio / Ollama — Gemma 4 26B QAT, default,
+privacy-first, unico provider testato), `claude_fast` (Claude Haiku) o
+`claude_quality` (Claude Sonnet) — questi ultimi due **sperimentali e non
+verificati** contro l'API Anthropic reale.
 Ogni chiamata LLM è tracciata su `logs/llm_calls.jsonl` (vedi modulo llm_logging).
 
 **Pattern architetturale:** identico a OrgTransform AI — pipeline multi-agente
@@ -58,6 +60,44 @@ in `scaffold_consulting_crew.py`. Questo significa:
 - **Responsabilità assegnata al FinancialAgent**, perché è l'agente che già produce
   i numeri (break-even, scenari, costi) — è quello con più contesto per decidere
   quali grafici siano utili, e chi già portava questa mansione nel vecchio README.
+
+---
+
+## NOTA — VERIFICA ARITMETICA DEI DATI FINANZIARI
+
+Stesso principio dei grafici (non fidarsi ciecamente dell'output del modello),
+applicato ai **numeri**: dopo la pipeline, un modulo deterministico
+`app/services/financial_validation.py` — **nessuna chiamata LLM** — ricalcola in
+Python le relazioni tra i valori prodotti dagli agenti e le confronta con quanto
+dichiarato, entro una tolleranza relativa (default 5%).
+
+È uno **step separato, fuori dal revision loop** dell'Orchestrator: viene
+eseguito in coda a `Orchestrator.run()` sia nel ramo APPROVED sia nel ramo
+parziale (non convergente), avvolto in try/except così una verifica fallita non
+blocca mai la consegna del report.
+
+I **5 check** ricalcolati (`validate_financials`):
+1. **Margine unitario** = `unit_price` − Σ(costi variabili/unità) vs `pricing.unit_margin_eur`
+2. **Break-even** = (Σ costi fissi diretti + indiretti) / margine ricalcolato vs `break_even.units_per_month`
+3. **Somma voci `initial_capital`** vs `initial_capital_total_eur` (se dichiarato)
+4. **Copertura** = capitale proprio / fabbisogno (totale dichiarato se presente,
+   altrimenti Σ voci); coerente se la valutazione della banda 25-30% del modulo
+   coincide con `own_capital_check.meets_25_30_rule` dell'agente
+5. **Ricavo anno 1** (scenario base) ≤ SOM di mercato
+
+Un check non calcolabile per dati mancanti è marcato `non_verificabile` (mai
+un'eccezione). Output:
+- `dict` con `checks` (per riga: nome, valore dichiarato, valore ricalcolato,
+  coerente, tolleranza, nota) e `overall_coherent`;
+- **export `.xlsx`** (`export_validation_xlsx`, openpyxl — righe incoerenti in
+  rosso) salvato in `output/reports/business_plan_{id}_{slug}_validation.xlsx`,
+  path esposto in `OrchestratorResult.validation_xlsx_path`;
+- una **sezione markdown** "## Verifica Aritmetica dei Dati Finanziari" appesa in
+  coda al report (finisce sia nel `.md` sia nel `.docx`).
+
+Questi controlli aritmetici sono **complementari** ai 6 controlli di coerenza
+dell'Orchestrator (che sono LLM e soggettivi): qui è tutto codice puro e
+riproducibile.
 
 ---
 
@@ -133,7 +173,7 @@ business-plan-ai/
 │   │   ├── charts.py                # Rendering deterministico Plotly
 │   │   ├── web_search.py            # Serper → Playwright → ddgs (fallback 3 livelli)
 │   │   ├── report_builder.py        # Markdown → DOCX/MD, tabelle/bold, sezioni agente
-│   │   └── memory.py                # Redis sessione (opzionale)
+│   │   └── financial_validation.py  # Verifica aritmetica deterministica (NON-LLM) + export xlsx
 │   │
 │   └── config/
 │       └── settings.py              # pydantic-settings da .env
@@ -251,11 +291,13 @@ class OrchestratorResult:
     business_plan_md_path: str          # il report è salvato anche in .md, non solo .docx
     total_iterations: int
     status: RevisionStatus
+    validation_xlsx_path: str = ""      # path dell'xlsx di verifica finanziaria (vuoto se la verifica fallisce)
 ```
 
 > Nota: `BusinessIdeaProfile.raw_intake_notes` è popolato dall'IntakeAgent dalla
 > chiave `raw_section_notes` del suo output JSON. `OrchestratorResult` espone sia
-> `business_plan_docx_path` sia `business_plan_md_path` (vedi report_builder).
+> `business_plan_docx_path` sia `business_plan_md_path` (vedi report_builder),
+> più `validation_xlsx_path` (vedi financial_validation, sotto).
 
 ---
 
@@ -476,7 +518,8 @@ Dato il piano (idea, mercato, team, setup legale), produci:
 2. PRICING: prezzo di vendita proposto e margine per unità
 3. BREAK_EVEN: volume di vendita necessario per coprire i costi fissi
 4. SCENARIOS: proiezioni a 3 anni in scenario base/ottimistico/pessimistico
-5. INITIAL_CAPITAL: capitale iniziale necessario, voce per voce
+5. INITIAL_CAPITAL: capitale iniziale necessario, voce per voce. Fornisci anche
+   initial_capital_total_eur = somma esatta delle voci (deve combaciare).
 6. PAYBACK_PERIOD: stima prudente del tempo di recupero dell'investimento
 7. ASSUMPTIONS: lista esplicita di tutte le assunzioni usate (non nasconderle
    nei numeri arrotondati)
@@ -504,6 +547,7 @@ Schema di output:
     {"scenario": str, "year1_revenue_eur": float, "year2_revenue_eur": float, "year3_revenue_eur": float}
   ],
   "initial_capital": [{"item": str, "amount_eur": float}],
+  "initial_capital_total_eur": float,
   "payback_period_months": str,
   "assumptions": [str],
   "charts_needed": [
@@ -1903,6 +1947,7 @@ class BusinessPlanResponse(BaseModel):
     charts_generated: list[str]
     revision_cycles: int
     agent_outputs: dict[str, dict]
+    validation_xlsx_path: str = ""     # path dell'xlsx di verifica finanziaria
 ```
 
 ---
@@ -1910,10 +1955,12 @@ class BusinessPlanResponse(BaseModel):
 ## CONFIGURATION — app/config/settings.py
 
 ```python
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
     # LLM
     LLM_BASE_URL: str = "http://localhost:1234/v1"
     LLM_MODEL: str = "gemma-4-26b"
@@ -1926,9 +1973,6 @@ class Settings(BaseSettings):
     # Output
     OUTPUT_DIR: str = "output"
 
-    # Redis (opzionale)
-    REDIS_URL: str = "redis://localhost:6379/0"
-
     # App
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
@@ -1936,10 +1980,6 @@ class Settings(BaseSettings):
 
     # Orchestrator
     MAX_REVISION_CYCLES: int = 3
-
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
 
 
 settings = Settings()
@@ -1956,7 +1996,6 @@ LLM_PROVIDER=local          # local | claude_fast | claude_quality
 ANTHROPIC_API_KEY=          # richiesto solo per claude_fast / claude_quality
 SERPER_API_KEY=
 OUTPUT_DIR=output
-REDIS_URL=redis://localhost:6379/0
 APP_HOST=0.0.0.0
 APP_PORT=8000
 MAX_REVISION_CYCLES=3

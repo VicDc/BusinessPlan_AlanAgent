@@ -1,3 +1,5 @@
+import warnings
+
 import httpx
 from app.config.settings import settings
 from app.services.llm_logging import log_llm_call, new_call_id, Timer
@@ -8,6 +10,16 @@ class LLMService:
     Client provider-agnostic. Si connette a LM Studio o Ollama via API
     OpenAI-compatible. Stesso servizio già usato in OrgTransform AI —
     riusalo tale e quale, non serve reimplementarlo.
+
+    ATTENZIONE — provider claude_fast/claude_quality: SPERIMENTALI e NON
+    verificati. Il codice sotto riusa lo stesso path OpenAI-compatible del
+    provider locale (endpoint /chat/completions, header `Authorization:
+    Bearer`, payload con `chat_template_kwargs`). L'API Anthropic reale usa
+    invece l'endpoint /v1/messages con header `x-api-key` + `anthropic-version`
+    e uno schema di richiesta/risposta diverso. Questi rami non sono mai stati
+    eseguiti contro l'API vera (nessuna key in test): trattali come predisposti
+    ma da verificare/riscrivere prima dell'uso in produzione. Provider
+    supportato e testato: "local".
     """
 
     def __init__(self):
@@ -17,10 +29,24 @@ class LLMService:
             self.model = settings.LLM_MODEL
             self._headers: dict = {}
         elif provider == "claude_fast":
+            # ponytail: sperimentale, non verificato — vedi docstring classe.
+            warnings.warn(
+                "LLM_PROVIDER='claude_fast' è sperimentale e non verificato "
+                "contro l'API Anthropic reale (usa il path OpenAI-compatible). "
+                "Usa 'local' per l'esecuzione supportata.",
+                stacklevel=2,
+            )
             self.base_url = "https://api.anthropic.com/v1"
             self.model = "claude-haiku-4-5-20251001"
             self._headers = {"Authorization": f"Bearer {settings.ANTHROPIC_API_KEY}"}
         elif provider == "claude_quality":
+            # ponytail: sperimentale, non verificato — vedi docstring classe.
+            warnings.warn(
+                "LLM_PROVIDER='claude_quality' è sperimentale e non verificato "
+                "contro l'API Anthropic reale (usa il path OpenAI-compatible). "
+                "Usa 'local' per l'esecuzione supportata.",
+                stacklevel=2,
+            )
             self.base_url = "https://api.anthropic.com/v1"
             self.model = "claude-sonnet-5"
             self._headers = {"Authorization": f"Bearer {settings.ANTHROPIC_API_KEY}"}

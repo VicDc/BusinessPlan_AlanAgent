@@ -235,7 +235,7 @@ async def test_orchestrator_approved_flow(base_profile, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_revision_loop_and_max_cycles(base_profile):
+async def test_orchestrator_revision_loop_and_max_cycles(base_profile, tmp_path):
     orch_responses = [
         json.dumps({
             "status": "REVISION_NEEDED",
@@ -285,7 +285,8 @@ async def test_orchestrator_revision_loop_and_max_cycles(base_profile):
     with patch("app.agents.orchestrator.settings.MAX_REVISION_CYCLES", 3), \
          patch("app.services.charts.render_chart_specs", return_value=[]), \
          patch("app.agents.orchestrator.markdown_to_docx", return_value="dummy_path.docx"), \
-         patch("app.agents.orchestrator.save_markdown_report", return_value="dummy_path.md"):
+         patch("app.agents.orchestrator.save_markdown_report", return_value="dummy_path.md"), \
+         patch("app.services.report_builder.OUTPUT_DIR", tmp_path):
         result = await orchestrator.run(base_profile)
 
         assert result.status == RevisionStatus.APPROVED

@@ -1,7 +1,9 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
     # LLM
     LLM_BASE_URL: str = "http://localhost:1234/v1"
     LLM_MODEL: str = "gemma-4-26b"
@@ -14,9 +16,6 @@ class Settings(BaseSettings):
     # Output
     OUTPUT_DIR: str = "output"
 
-    # Redis (opzionale)
-    REDIS_URL: str = "redis://localhost:6379/0"
-
     # App
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
@@ -24,10 +23,6 @@ class Settings(BaseSettings):
 
     # Orchestrator
     MAX_REVISION_CYCLES: int = 3
-
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
 
 
 settings = Settings()

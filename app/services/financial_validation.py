@@ -18,10 +18,15 @@ DEFAULT_TOLERANCE = 0.05
 
 def _num(value):
     """Coerce a float. None se non interpretabile.
-    ponytail: parser tollerante ma naive — rimuove separatori migliaia E
-    decimali; valori con decimali reali (rari nei totali di mercato/ricavi)
-    vanno persi. Gestisce suffissi k/m/mln. Sufficiente per confronti su
-    ricavi/costi interi."""
+    Gestisce numeri come stringhe con formattazione IT/EN, valuta e suffissi
+    (k/m/mln), preservando i decimali:
+      "1.234,56 €" -> 1234.56 · "50,5" -> 50.5 · "50.000" -> 50000 · "1,5k" -> 1500
+    Regole separatori: se compaiono sia '.' sia ',', il più a destra è il
+    decimale; se ne compare uno solo una volta con 1-2 cifre in coda è
+    decimale, altrimenti è separatore delle migliaia.
+    ponytail: euristica, non un parser di locale completo — un separatore
+    singolo con esattamente 3 cifre in coda è trattato come migliaia (caso più
+    comune nei totali), quindi "1.234" -> 1234, non 1.234."""
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -31,16 +36,37 @@ def _num(value):
     s = value.strip().lower()
     if not s:
         return None
+    neg = s.startswith("-")
     mult = 1.0
     for suf, m in (("mln", 1e6), ("mil", 1e6), ("m", 1e6), ("k", 1e3)):
         if s.endswith(suf):
             mult = m
             s = s[: -len(suf)]
             break
-    digits = re.sub(r"[^0-9]", "", s)
-    if not digits:
+    s = re.sub(r"[^0-9.,]", "", s)  # via valuta, spazi, segni
+    if not re.search(r"\d", s):
         return None
-    return float(digits) * mult
+
+    has_dot, has_comma = "." in s, "," in s
+    if has_dot and has_comma:
+        if s.rfind(".") > s.rfind(","):
+            s = s.replace(",", "")               # '.' decimale, ',' migliaia
+        else:
+            s = s.replace(".", "").replace(",", ".")  # ',' decimale
+    elif has_comma:
+        if s.count(",") == 1 and len(s.split(",")[1]) in (1, 2):
+            s = s.replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif has_dot:
+        if not (s.count(".") == 1 and len(s.split(".")[1]) in (1, 2)):
+            s = s.replace(".", "")               # migliaia, non decimale
+
+    try:
+        val = float(s) * mult
+    except ValueError:
+        return None
+    return -val if neg else val
 
 
 def _sum_amounts(items, *keys):
