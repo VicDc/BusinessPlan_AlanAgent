@@ -76,8 +76,13 @@ def log_agent_result(
     json_valid: bool,
     status: str,
     confidence: float | None = None,
-    is_revision: bool = False
+    is_revision: bool = False,
+    web_search: str | None = None
 ):
+    """web_search: esito della ricerca web per gli agenti che la usano
+    (Market/Funding) — "results" (fonti reali), "empty" (nessun risultato),
+    "failed" (eccezione), "unavailable" (nessun servizio iniettato). None per
+    gli agenti che non fanno ricerca."""
     record = {
         "type": "agent_result",
         "call_id": call_id,
@@ -87,7 +92,8 @@ def log_agent_result(
         "json_valid": json_valid,
         "status": status,
         "confidence": confidence,
-        "is_revision": is_revision
+        "is_revision": is_revision,
+        "web_search": web_search
     }
     _safe_write_log(record)
 

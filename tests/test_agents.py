@@ -178,11 +178,47 @@ async def test_market_and_funding_web_search(base_profile):
     
     market = MarketAgent(llm, web_search_service=mock_search)
     await market.process(base_profile)
-    mock_search.search.assert_called_with("mercato F&B Italy", max_results=3)
-    
+    # query ora include l'elemento distintivo (prime parole di need_addressed)
+    mock_search.search.assert_called_with("mercato Test Need F&B Italy", max_results=3)
+
     funding = FundingAgent(llm, web_search_service=mock_search)
     await funding.process(base_profile)
-    mock_search.search.assert_called_with("bandi agevolazioni startup F&B Italy", max_results=3)
+    # FundingAgent: max_results alzato a 5 (i bandi sono numerosi)
+    mock_search.search.assert_called_with("bandi agevolazioni startup Test Need F&B Italy", max_results=5)
+
+
+def _read_agent_results(log_file):
+    recs = []
+    for line in Path(log_file).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            d = json.loads(line)
+            if d.get("type") == "agent_result":
+                recs.append(d)
+    return recs
+
+
+@pytest.mark.asyncio
+async def test_web_search_unavailable_is_logged(base_profile):
+    import app.services.llm_logging as L
+    llm = MockLLMService({"market": json.dumps({"confidence": 0.8})})
+    market = MarketAgent(llm, web_search_service=None)  # nessun servizio
+    out = await market.process(base_profile)
+    assert out.status == "success"  # non crasha
+    recs = _read_agent_results(L.LOGS_FILE)
+    assert recs and recs[-1]["web_search"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_web_search_failure_is_logged(base_profile):
+    import app.services.llm_logging as L
+    mock_search = AsyncMock()
+    mock_search.search.side_effect = RuntimeError("boom")
+    llm = MockLLMService({"funding": json.dumps({"confidence": 0.8})})
+    funding = FundingAgent(llm, web_search_service=mock_search)
+    out = await funding.process(base_profile)
+    assert out.status == "success"  # non crasha
+    recs = _read_agent_results(L.LOGS_FILE)
+    assert recs[-1]["web_search"] == "failed"
 
 
 @pytest.mark.asyncio

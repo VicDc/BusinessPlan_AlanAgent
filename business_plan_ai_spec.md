@@ -1045,11 +1045,32 @@ class FinancialAgent(BaseAgent):
             )
 ```
 
-> Ripeti lo stesso pattern per VisionAgent, MarketAgent, TeamAgent, SetupAgent,
-> FundingAgent. Ognuno usa la propria costante di prompt da `prompts.py` e lo
-> stesso `BaseAgent._build_user_message()`. MarketAgent e FundingAgent, in più,
-> ricevono in iniezione anche `web_search_service` per dati real-time (vedi
-> `services/web_search.py`).
+> Ripeti lo stesso pattern per VisionAgent, TeamAgent, SetupAgent. Ognuno usa la
+> propria costante di prompt da `prompts.py` e lo stesso
+> `BaseAgent._build_user_message()`, e logga il proprio esito di parsing con
+> `log_agent_result` / `log_failed_raw_response`.
+>
+> **MarketAgent e FundingAgent sono diversi**: a differenza degli altri (incluso
+> FinancialAgent, che NON fa ricerca) ricevono in iniezione `web_search_service`
+> ed eseguono ricerca web reale prima di chiamare l'LLM. Nel dettaglio:
+> - **Query distintiva**: costruita da `sector_hint` + `target_region` + un
+>   estratto del progetto (le prime parole di `need_addressed`, con fallback su
+>   `idea_description`, via l'helper `first_words()` in `base.py`), troncata a
+>   ~10 parole per restare breve ma catturare l'elemento distintivo, non solo il
+>   settore generico. MarketAgent: `"mercato {estratto} {settore} {regione}"`;
+>   FundingAgent: `"bandi agevolazioni startup {estratto} {settore} {regione}"`.
+> - **max_results**: MarketAgent `3`, FundingAgent `5` (i bandi sono numerosi).
+> - **Iniezione nel prompt**: se ci sono risultati, vengono inseriti sotto un
+>   header dedicato (`RISULTATI RICERCA WEB REAL-TIME DI MERCATO` /
+>   `... DI BANDI E FINANZIAMENTI`).
+> - **Fallimento o indisponibilità**: se `web_search` è `None`, solleva
+>   un'eccezione, o restituisce zero risultati, l'agente **prosegue senza
+>   bloccare** ma aggiunge al prompt una nota esplicita — *"NESSUN dato web
+>   disponibile: basa l'analisi solo su conoscenze generali e segnala
+>   esplicitamente che i competitor/bandi elencati vanno verificati."* — così il
+>   modello non spaccia dati inventati per fonti reali.
+> - **Tracciabilità**: l'esito della ricerca è registrato nel log (vedi
+>   `web_status` / `log_agent_result` nella sezione llm_logging).
 
 ---
 
@@ -1550,7 +1571,14 @@ def _strip_code_fence(text: str) -> str:
 >   `iteration`, `model`, `temperature`, `max_tokens`, `latency_seconds`, token
 >   usage (`prompt/completion/total_tokens`), `error`.
 > - `agent_result` — esito del parsing dell'output di un agente: `json_valid`,
->   `status`, `confidence`, `is_revision`.
+>   `status`, `confidence`, `is_revision`, `web_search`.
+>   Il campo `web_search` (parametro omonimo di `log_agent_result`) registra
+>   l'esito della ricerca web per gli agenti che la usano (Market/Funding) con
+>   uno di quattro valori: `results` (fonti reali trovate), `empty` (ricerca
+>   eseguita, zero risultati), `failed` (eccezione durante la ricerca),
+>   `unavailable` (nessun `web_search_service` iniettato). È `None` per gli
+>   agenti che non fanno ricerca. Serve a sapere, per ogni run, se l'analisi di
+>   mercato/funding si è basata su fonti reali o sulla sola conoscenza del modello.
 > - `orchestrator_iteration` — stato di un giro del revision loop:
 >   `final_status`, `revisions_needed_count`, `agents_flagged`, `revisions_applied`.
 >
@@ -2158,6 +2186,20 @@ e il codice reale attuale (v1.1). Serve a mantenere la storia delle decisioni.
   libreria `ddgs`. In v1.0 erano solo due livelli (Serper → DuckDuckGo).
 - La dipendenza `duckduckgo-search` è stata rinominata in `ddgs`; aggiunta
   `playwright` (richiede `playwright install chromium`).
+
+### Ricerca web tracciabile in Market/Funding (`market_agent.py`, `funding_agent.py`, `base.py`, `llm_logging.py`)
+- **Query distintiva**: la query non è più solo `settore + regione`, ma include
+  un estratto del progetto (prime parole di `need_addressed` / `idea_description`
+  via il nuovo helper `first_words()` in `base.py`), troncata a ~10 parole.
+- **max_results**: FundingAgent alzato a `5` (i bandi sono numerosi); MarketAgent
+  resta `3`.
+- **Nota anti-allucinazione**: se la ricerca fallisce, non è disponibile
+  (`web_search=None`) o dà zero risultati, l'agente aggiunge al prompt una nota
+  che invita a verificare competitor/bandi e a non spacciarli per dati reali.
+- **Tracciabilità**: nuovo campo `web_search` in `agent_result` (parametro
+  omonimo di `log_agent_result`) con valori `results` / `empty` / `failed` /
+  `unavailable`: per ogni run si sa se l'analisi di mercato/funding si è basata
+  su fonti reali o sulla sola conoscenza del modello.
 
 ### Separazione Orchestrator / ReportWriter (`prompts.py`, `orchestrator.py`)
 - **Motivo**: Gemma 4 ha il reasoning forzato lato server. Chiedere in una sola

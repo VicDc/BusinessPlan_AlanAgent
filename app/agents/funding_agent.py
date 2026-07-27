@@ -1,8 +1,14 @@
 import json
-from app.agents.base import BaseAgent
+from app.agents.base import BaseAgent, first_words
 from app.core.types import AgentOutput, BusinessIdeaProfile
 from app.core.prompts import FUNDING_AGENT_PROMPT
 from app.services.llm_logging import log_agent_result, log_failed_raw_response
+
+_NO_WEB_NOTE = (
+    "\n\nNESSUN dato web disponibile: basa l'analisi solo su conoscenze "
+    "generali e segnala esplicitamente che i competitor/bandi elencati vanno "
+    "verificati.\n"
+)
 
 
 class FundingAgent(BaseAgent):
@@ -17,13 +23,20 @@ class FundingAgent(BaseAgent):
         correction_context: str | None = None
     ) -> AgentOutput:
         search_results = []
-        if self.web_search:
+        if self.web_search is None:
+            web_status = "unavailable"
+        else:
             try:
-                query = f"bandi agevolazioni startup {profile.sector_hint} {profile.target_region}"
-                search_results = await self.web_search.search(query, max_results=3)
+                distintivo = first_words(profile.need_addressed or profile.idea_description, 4)
+                query = " ".join(
+                    f"bandi agevolazioni startup {distintivo} {profile.sector_hint} {profile.target_region}".split()[:10]
+                )
+                search_results = await self.web_search.search(query, max_results=5)
+                web_status = "results" if search_results else "empty"
             except Exception as e:
                 # Non blocco l'esecuzione per errori della ricerca
                 print(f"[FundingAgent] Errore di ricerca web: {e}")
+                web_status = "failed"
 
         user_message = self._build_user_message(profile, context, correction_context)
         if search_results:
@@ -32,6 +45,8 @@ class FundingAgent(BaseAgent):
                 for r in search_results
             )
             user_message += f"\n\nRISULTATI RICERCA WEB REAL-TIME DI BANDI E FINANZIAMENTI:\n{search_str}\n"
+        else:
+            user_message += _NO_WEB_NOTE
 
         raw = await self.llm.generate(
             system_prompt=FUNDING_AGENT_PROMPT,
@@ -51,7 +66,8 @@ class FundingAgent(BaseAgent):
                 json_valid=True,
                 status="success",
                 confidence=data.get("confidence", 0.7),
-                is_revision=bool(correction_context)
+                is_revision=bool(correction_context),
+                web_search=web_status
             )
             return AgentOutput(
                 agent_name=self.name,
@@ -71,7 +87,8 @@ class FundingAgent(BaseAgent):
                 json_valid=False,
                 status="error",
                 confidence=0.0,
-                is_revision=bool(correction_context)
+                is_revision=bool(correction_context),
+                web_search=web_status
             )
             return AgentOutput(
                 agent_name=self.name,

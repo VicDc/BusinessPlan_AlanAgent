@@ -2,6 +2,12 @@ from abc import ABC, abstractmethod
 from app.core.types import AgentOutput, BusinessIdeaProfile
 
 
+def first_words(text: str, n: int = 4) -> str:
+    """Primi n parole di un testo (per costruire query di ricerca distintive
+    ma brevi). Robusto a None/stringa vuota."""
+    return " ".join((text or "").split()[:n])
+
+
 class BaseAgent(ABC):
     def __init__(self, llm_service, name: str):
         self.llm = llm_service
